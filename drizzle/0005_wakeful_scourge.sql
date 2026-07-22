@@ -1,0 +1,1 @@
+ALTER TABLE `activity_hours` ADD `document_id` text REFERENCES documents(id);

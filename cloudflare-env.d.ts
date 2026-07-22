@@ -22,6 +22,7 @@ interface R2Bucket {
     value: ReadableStream | ArrayBuffer | Blob | string,
     options?: { httpMetadata?: { contentType?: string } },
   ): Promise<unknown>;
+  get(key: string): Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string } } | null>;
 }
 
 interface Fetcher {
@@ -32,5 +33,8 @@ declare module "cloudflare:workers" {
   export const env: {
     DB: D1Database;
     FILES: R2Bucket;
+    AI_EXTRACTION_ENABLED?: string;
+    OPENAI_API_KEY?: string;
+    OPENAI_MODEL?: string;
   };
 }

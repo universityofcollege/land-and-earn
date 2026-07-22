@@ -1,0 +1,1 @@
+ALTER TABLE `reimbursement_claims` ADD `supporting_document_id` text REFERENCES documents(id);

@@ -10,6 +10,10 @@ export type EmployerSummary = {
   paySchedule: string;
   purchaseOrderId: string;
   poNumber: string;
+  poIssuedAt: string;
+  poEffectiveEnd: string;
+  poDocumentId: string | null;
+  poDocumentName: string | null;
   originalFunding: number;
   amendmentFunding: number;
   currentFunding: number;
@@ -28,6 +32,10 @@ export type PacketSummary = {
   poNumber: string;
   internName: string | null;
   placement: string | null;
+  supervisorName: string | null;
+  supervisorEmail: string | null;
+  county: string | null;
+  fiscalYear: string;
   label: string;
   periodStart: string;
   periodEnd: string;
@@ -45,6 +53,8 @@ export type PacketSummary = {
   exceptions: PacketException[];
   documents: PacketDocument[];
   activities: ActivityHour[];
+  claims: ReimbursementClaim[];
+  history: AuditEvent[];
 };
 
 export type PacketException = {
@@ -56,6 +66,9 @@ export type PacketException = {
   status: string;
   createdAt: string;
   resolvedAt: string | null;
+  resolutionType: string | null;
+  resolutionReason: string | null;
+  resolvedBy: string | null;
 };
 
 export type PacketDocument = {
@@ -65,15 +78,42 @@ export type PacketDocument = {
   status: string;
   amount: number | null;
   uploadedAt: string;
+  classificationConfidence: number;
+  extractionProvider: string;
+  hasOriginal: boolean;
+  fieldEvidence: Array<{ id: string; name: string; value: unknown; confidence: number; source: string; status: string }>;
   extracted: Record<string, unknown>;
 };
 
-export type ActivityHour = { id: string; category: string; hours: number; source: string };
+export type ActivityHour = { id: string; documentId: string | null; category: string; hours: number; source: string };
+export type ReimbursementClaim = {
+  id: string;
+  documentId: string;
+  type: string;
+  description: string;
+  businessPurpose: string;
+  category: string;
+  amountRequested: number;
+  amountEligible: number | null;
+  status: string;
+  supportingDocumentId: string | null;
+  supportingDocumentName: string | null;
+  source: string;
+  confidence: number;
+  checks: EligibilityCheck[];
+};
+export type EligibilityCheck = { id: string; authorityLevel: string; result: string; reason: string; confidence: number; reviewedAt: string | null };
+export type AuditEvent = { id: string; entityType: string; entityId: string; action: string; actor: string; occurredAt: string; before: unknown; after: unknown; reason: string | null };
+export type MouSummary = { id: string; employerId: string; code: string; version: string; effectiveStart: string; effectiveEnd: string; status: string; allowedExpenses: string[]; limits: Record<string, number>; conditions: string[]; evidenceRequirements: string[]; documentId: string | null; documentName: string | null };
+export type ProgramSettings = { id: string; name: string; hourlyRate: number; fiscalYearStart: string; fiscalYearEnd: string; invoiceDeadline: string; paymentDeadline: string; retentionYears: number; poWarningPercent: number };
+export type UnmatchedDocument = { id: string; employerId: string; employerName: string; kind: string; fileName: string; status: string; uploadedAt: string; confidence: number; provider: string; hasOriginal: boolean };
 export type ReminderDraft = {
   id: string;
   employerId: string;
   employerName: string;
   contactEmail: string;
+  recipientName: string | null;
+  recipientRole: string;
   packetId: string | null;
   subject: string;
   body: string;
@@ -110,4 +150,7 @@ export type DashboardData = {
   reminders: ReminderDraft[];
   poEvents: PoEvent[];
   policies: PolicyRecord[];
+  settings: ProgramSettings;
+  mous: MouSummary[];
+  unmatchedDocuments: UnmatchedDocument[];
 };

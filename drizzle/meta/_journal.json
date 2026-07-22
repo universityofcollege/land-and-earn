@@ -8,6 +8,48 @@
       "when": 1784749532680,
       "tag": "0000_lucky_dragon_man",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784751329517,
+      "tag": "0001_normal_gamora",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784752010553,
+      "tag": "0002_careless_inertia",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1784752320457,
+      "tag": "0003_majestic_bucky",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1784752568027,
+      "tag": "0004_odd_karen_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784753395924,
+      "tag": "0005_wakeful_scourge",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1784753823485,
+      "tag": "0006_flowery_harrier",
+      "breakpoints": true
     }
   ]
 }

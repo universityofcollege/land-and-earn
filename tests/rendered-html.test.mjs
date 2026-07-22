@@ -24,11 +24,28 @@ test("declares durable grant records and upload storage", async () => {
   ]);
   assert.match(hosting, /"d1":\s*"DB"/);
   assert.match(hosting, /"r2":\s*"FILES"/);
-  for (const table of ["employers", "purchaseOrders", "packets", "documents", "packetExceptions", "poEvents", "policies"]) {
+  for (const table of ["employers", "purchaseOrders", "packets", "documents", "packetExceptions", "poEvents", "policies", "programSettings", "mous", "documentPacketLinks", "documentFieldEvidence", "reimbursementClaims", "eligibilityChecks", "auditEvents"]) {
     assert.match(schema, new RegExp(`export const ${table}`));
   }
   assert.match(data, /Current funding available|invoice_received|purchase-order ledger/i);
   assert.match(page, /Get every employer reimbursed/);
   assert.match(page, /The strictest rule controls/);
   assert.ok(migrations.some((file) => file.endsWith(".sql")), "expected a generated D1 migration");
+});
+
+test("declares human approval, draft-only communication, and complete audit export guards", async () => {
+  const [data, operations, exportRoute, page] = await Promise.all([
+    readFile(new URL("../lib/data.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/operations/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/export/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(data, /Resolve all payment blockers before approval/);
+  assert.match(data, /every business-expense line must be linked to its supporting document/);
+  assert.match(data, /packet_archive_exported/);
+  assert.match(data, /zipSync/);
+  assert.match(exportRoute, /application\/zip/);
+  assert.match(page, /Draft only · nothing sends automatically/);
+  assert.doesNotMatch(operations, /send_(?:email|reminder)|auto_send/i);
+  assert.doesNotMatch(operations, /gmail|outlook|smtp|sendgrid/i);
 });

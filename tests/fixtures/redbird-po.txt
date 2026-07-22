@@ -1,0 +1,6 @@
+PURCHASE ORDER
+PO number: PO-26-1177
+Employer: Red Bird Mission
+Authorized funding: $136,100.00
+Effective date: 07/01/2025
+Effective end: 06/30/2026
