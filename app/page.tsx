@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { type ChangeEvent, type DragEvent, useMemo, useRef, useState } from "react";
 
 type ScenarioKey = "conference" | "equipment" | "training" | "supplies";
 
@@ -17,6 +17,22 @@ type Recommendation = {
   checks: string[];
   caution?: string;
   sources: string[];
+};
+
+type Flow = "plan" | "transactions";
+type TransactionStatus = "aligned" | "change" | "review";
+
+type Transaction = {
+  id: string;
+  date: string;
+  merchant: string;
+  category: string;
+  amount: number;
+  currentFund: string;
+  recommendedFund: string;
+  confidence: number;
+  status: TransactionStatus;
+  reason: string;
 };
 
 const projectBalances = [
@@ -113,6 +129,17 @@ const quickPrompts = [
   "I need to order student activity supplies",
 ];
 
+const sampleTransactions: Transaction[] = [
+  { id: "tx-1", date: "2026-06-04", merchant: "Delta Air Lines", category: "Travel", amount: 486.2, currentFund: "OPS-01", recommendedFund: "1026-03", confidence: 94, status: "change", reason: "Conference travel is grant-related and falls within the active project period." },
+  { id: "tx-2", date: "2026-06-05", merchant: "Marriott Downtown", category: "Travel", amount: 782.44, currentFund: "1026-03", recommendedFund: "1026-03", confidence: 92, status: "aligned", reason: "Lodging supports the same documented conference activity." },
+  { id: "tx-3", date: "2026-06-09", merchant: "Staples Business", category: "Program supplies", amount: 318.67, currentFund: "1016-04", recommendedFund: "1016-04", confidence: 88, status: "aligned", reason: "Materials align to Promise Neighborhoods participant activities." },
+  { id: "tx-4", date: "2026-06-12", merchant: "Bluegrass Technology", category: "Equipment", amount: 4298, currentFund: "1026-03", recommendedFund: "1026-03", confidence: 79, status: "review", reason: "Likely allowable, but written technology approval and equipment treatment must be confirmed." },
+  { id: "tx-5", date: "2026-06-18", merchant: "Civic Learning Institute", category: "Training", amount: 1850, currentFund: "OPS-01", recommendedFund: "1023-03", confidence: 87, status: "change", reason: "The training description most closely matches Breathitt & Knott project delivery." },
+  { id: "tx-6", date: "2026-06-21", merchant: "The Copper Bar", category: "Meals & incidentals", amount: 94.18, currentFund: "1026-03", recommendedFund: "OPS-01", confidence: 98, status: "change", reason: "Alcoholic beverages are unallowable on federal awards; move to unrestricted funds after review." },
+  { id: "tx-7", date: "2026-06-24", merchant: "Adobe Systems", category: "Software", amount: 239.88, currentFund: "OPS-01", recommendedFund: "OPS-01", confidence: 73, status: "review", reason: "Broad organizational benefit is likely; confirm Information Systems approval and allocation basis." },
+  { id: "tx-8", date: "2026-06-27", merchant: "USPS", category: "Program supplies", amount: 76.42, currentFund: "1026-03", recommendedFund: "1026-03", confidence: 91, status: "aligned", reason: "Transportation and postage for program materials are generally allowable." },
+];
+
 function money(value: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -127,6 +154,189 @@ function classify(text: string): ScenarioKey {
   if (/training|trainer|workshop|speaker/.test(lower)) return "training";
   if (/suppl|book|material|ticket/.test(lower)) return "supplies";
   return "conference";
+}
+
+function currency(value: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(value);
+}
+
+function recommendationFor(merchant: string, currentFund: string, amount: number): Omit<Transaction, "id" | "date" | "merchant" | "amount" | "currentFund"> {
+  const value = merchant.toLowerCase();
+  if (/bar|liquor|wine|brew|alcohol/.test(value)) return { category: "Meals & incidentals", recommendedFund: "OPS-01", confidence: 98, status: currentFund === "OPS-01" ? "review" : "change", reason: "Potential alcohol expense: federal awards prohibit alcoholic beverages. Route to unrestricted funds for review." };
+  if (/air|delta|united|hotel|marriott|hilton|conference|uber|lyft|rental car/.test(value)) return { category: "Travel", recommendedFund: "1026-03", confidence: 92, status: currentFund === "1026-03" ? "aligned" : "change", reason: "Historical pattern and expense type indicate project-related travel; retain supporting business purpose." };
+  if (/laptop|computer|technology|software|adobe|microsoft/.test(value)) return { category: amount >= 1000 ? "Equipment" : "Software", recommendedFund: currentFund === "Uncoded" ? "1026-03" : currentFund, confidence: 78, status: "review", reason: "Technology may be allowable, but written Information Systems approval and the allocation basis must be verified." };
+  if (/training|institute|workshop|speaker/.test(value)) return { category: "Training", recommendedFund: "1023-03", confidence: 87, status: currentFund === "1023-03" ? "aligned" : "change", reason: "Training is generally allowable when it directly supports award delivery; confirm contract documentation." };
+  if (/staples|supply|book|usps|material/.test(value)) return { category: "Program supplies", recommendedFund: currentFund === "Uncoded" ? "1016-04" : currentFund, confidence: 88, status: currentFund === "Uncoded" ? "review" : "aligned", reason: "Materials and related delivery costs are generally allowable when necessary for the award." };
+  return { category: "Other", recommendedFund: currentFund === "Uncoded" ? "OPS-01" : currentFund, confidence: 64, status: "review", reason: "The transaction description does not establish a clear program benefit. Add a business purpose before allocation." };
+}
+
+function normalizeUploadedRows(rows: Record<string, unknown>[]): Transaction[] {
+  const valueFor = (row: Record<string, unknown>, patterns: RegExp[]) => {
+    const entry = Object.entries(row).find(([key]) => patterns.some((pattern) => pattern.test(key.toLowerCase())));
+    return entry?.[1];
+  };
+  return rows.slice(0, 150).map((row, index) => {
+    const merchant = String(valueFor(row, [/merchant/, /description/, /vendor/, /transaction/]) ?? `Transaction ${index + 1}`);
+    const rawAmount = valueFor(row, [/^amount$/, /transaction amount/, /debit/, /charge/]);
+    const amount = Math.abs(Number(String(rawAmount ?? 0).replace(/[$,()]/g, ""))) || 0;
+    const dateValue = valueFor(row, [/transaction date/, /posting date/, /^date$/]);
+    const parsedDate = dateValue instanceof Date ? dateValue : new Date(String(dateValue ?? ""));
+    const date = Number.isNaN(parsedDate.getTime()) ? "Date not provided" : parsedDate.toISOString().slice(0, 10);
+    const currentFund = String(valueFor(row, [/fund/, /project/, /account/, /coding/]) ?? "Uncoded").trim() || "Uncoded";
+    const suggested = recommendationFor(merchant, currentFund, amount);
+    return { id: `upload-${index}`, date, merchant, amount, currentFund, ...suggested };
+  }).filter((row) => row.amount > 0 || !row.merchant.startsWith("Transaction "));
+}
+
+function TransactionReview() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [transactions, setTransactions] = useState<Transaction[] | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [isParsing, setIsParsing] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [filter, setFilter] = useState<"all" | TransactionStatus>("all");
+  const [selectedRows, setSelectedRows] = useState<string[]>([]);
+  const [staged, setStaged] = useState(false);
+
+  const analyzeFile = async (file: File) => {
+    setUploadError("");
+    setIsParsing(true);
+    try {
+      const XLSX = await import("xlsx");
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+      const normalized = normalizeUploadedRows(rows);
+      if (!normalized.length) throw new Error("No transaction rows found");
+      setTransactions(normalized);
+      setFileName(file.name);
+      setSelectedRows([]);
+      setStaged(false);
+    } catch {
+      setUploadError("We couldn’t find transaction rows. Export the card activity with Date, Description, and Amount columns, then try again.");
+    } finally {
+      setIsParsing(false);
+    }
+  };
+
+  const chooseFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) void analyzeFile(file);
+  };
+
+  const dropFile = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (file) void analyzeFile(file);
+  };
+
+  const loadSample = () => {
+    setTransactions(sampleTransactions);
+    setFileName("June_2026_card_activity.xlsx");
+    setSelectedRows([]);
+    setUploadError("");
+    setStaged(false);
+  };
+
+  const stats = useMemo(() => {
+    if (!transactions) return null;
+    const total = transactions.reduce((sum, row) => sum + row.amount, 0);
+    const aligned = transactions.filter((row) => row.status === "aligned").length;
+    const changes = transactions.filter((row) => row.status === "change").length;
+    const reviews = transactions.filter((row) => row.status === "review").length;
+    return { total, aligned, changes, reviews, alignedRate: Math.round((aligned / transactions.length) * 100) };
+  }, [transactions]);
+
+  const visibleTransactions = transactions?.filter((row) => filter === "all" || row.status === filter) ?? [];
+  const toggleRow = (id: string) => setSelectedRows((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const corrections = transactions?.filter((row) => row.status === "change") ?? [];
+
+  return (
+    <>
+      <div className="intro transaction-intro">
+        <span className="eyebrow">Historical allocation review</span>
+        <h1>Turn card activity into funding decisions.</h1>
+        <p>Upload a card transaction export. FundGuide will learn from the spending pattern, test each charge against the funding rules, and identify likely reallocations.</p>
+      </div>
+
+      {!transactions ? (
+        <>
+          <div className={`upload-zone ${isParsing ? "parsing" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={dropFile}>
+            <input ref={inputRef} type="file" accept=".csv,.tsv,.xlsx,.xls" onChange={chooseFile} hidden />
+            <div className="upload-mark" aria-hidden="true"><span>↑</span><i /></div>
+            <span className="eyebrow">Card activity export</span>
+            <h2>{isParsing ? "Reading transactions…" : "Drop a spreadsheet here"}</h2>
+            <p>CSV or Excel · Date, description, and amount are enough to begin</p>
+            <div className="upload-actions">
+              <button className="upload-primary" onClick={() => inputRef.current?.click()} disabled={isParsing}>{isParsing ? "Analyzing…" : "Choose transaction file"}</button>
+              <button className="upload-secondary" onClick={loadSample} disabled={isParsing}>Use sample activity</button>
+            </div>
+          </div>
+          {uploadError && <div className="upload-error" role="alert"><strong>Check the export format</strong><span>{uploadError}</span></div>}
+          <div className="review-steps">
+            <div><span>01</span><strong>Match the columns</strong><p>Date, merchant, amount, and current funding code are detected automatically.</p></div>
+            <div><span>02</span><strong>Apply the rules</strong><p>Each charge is checked for allowability, timing, approvals, and historical fit.</p></div>
+            <div><span>03</span><strong>Stage corrections</strong><p>Program directors can send proposed reclassifications to finance with the evidence attached.</p></div>
+          </div>
+          <div className="local-processing-note"><span>✓</span><p><strong>Prototype privacy</strong> Files are processed in this browser session and are not retained after the page is closed.</p></div>
+        </>
+      ) : (
+        <div className="transaction-results">
+          <div className="file-strip">
+            <div className="file-badge">XLS</div>
+            <div><strong>{fileName}</strong><span>{transactions.length} transactions recognized</span></div>
+            <div className="file-strip-actions"><span className="analysis-complete"><i /> Analysis complete</span><button onClick={() => inputRef.current?.click()}>Replace file</button></div>
+            <input ref={inputRef} type="file" accept=".csv,.tsv,.xlsx,.xls" onChange={chooseFile} hidden />
+          </div>
+
+          {stats && <div className="transaction-stats">
+            <div className="stat-total"><span>Total reviewed</span><strong>{currency(stats.total)}</strong><small>across {transactions.length} charges</small></div>
+            <div><span>Likely aligned</span><strong>{stats.alignedRate}%</strong><small>{stats.aligned} transactions</small></div>
+            <div><span>Move suggested</span><strong>{stats.changes}</strong><small>coding changes</small></div>
+            <div><span>Needs context</span><strong>{stats.reviews}</strong><small>director review</small></div>
+          </div>}
+
+          <div className="history-insight">
+            <div className="insight-mark">✦</div>
+            <div><span className="eyebrow">Historical pattern</span><h3>Travel is consistently charged to project funds; training is split across operations and programs.</h3><p>The strongest correction opportunity is to move documented program training and conference travel from unrestricted operations to the benefiting award.</p></div>
+            <div className="category-bars"><span><i style={{ width: "74%" }} />Travel <b>41%</b></span><span><i style={{ width: "51%" }} />Training <b>28%</b></span><span><i style={{ width: "32%" }} />Supplies <b>18%</b></span></div>
+          </div>
+
+          <div className="table-heading">
+            <div><span className="eyebrow">Transaction recommendations</span><h2>Review the proposed funding path</h2></div>
+            <div className="table-filters">
+              {(["all", "change", "review", "aligned"] as const).map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item === "all" ? "All" : item === "change" ? "Moves" : item === "review" ? "Review" : "Aligned"}</button>)}
+            </div>
+          </div>
+
+          <div className="transaction-table-wrap">
+            <table className="transaction-table">
+              <thead><tr><th aria-label="Select" /><th>Transaction</th><th>Amount</th><th>Current</th><th>Recommended path</th><th>Match</th><th>Status</th></tr></thead>
+              <tbody>{visibleTransactions.map((row) => (
+                <tr key={row.id} className={selectedRows.includes(row.id) ? "selected" : ""}>
+                  <td><input type="checkbox" checked={selectedRows.includes(row.id)} onChange={() => toggleRow(row.id)} aria-label={`Select ${row.merchant}`} /></td>
+                  <td><strong>{row.merchant}</strong><span>{row.date} · {row.category}</span><small>{row.reason}</small></td>
+                  <td className="transaction-amount">{currency(row.amount)}</td>
+                  <td><code>{row.currentFund}</code></td>
+                  <td><code className="recommended-code">{row.recommendedFund}</code>{row.currentFund !== row.recommendedFund && <span className="move-arrow">→ move</span>}</td>
+                  <td><strong className="confidence">{row.confidence}%</strong></td>
+                  <td><span className={`status status-${row.status}`}>{row.status === "change" ? "Move" : row.status === "review" ? "Review" : "Aligned"}</span></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+
+          <div className="transaction-actions">
+            <span>{selectedRows.length ? `${selectedRows.length} selected` : `${corrections.length} suggested corrections`}</span>
+            <div><button className="evidence-button">Export review</button><button className="analyze-button" onClick={() => setStaged(true)}>Stage {selectedRows.length || corrections.length} corrections <span>→</span></button></div>
+          </div>
+
+          {staged && <div className="success-banner" role="status"><span>✓</span><div><strong>Corrections staged for finance review</strong><p>{selectedRows.length || corrections.length} allocation proposals include the rule rationale and source evidence.</p></div><button onClick={() => setStaged(false)}>Dismiss</button></div>}
+        </div>
+      )}
+      <p className="disclaimer">FundGuide recommends funding paths from the available policy context and historical patterns. Finance must verify final account coding, documentation, and required approvals.</p>
+    </>
+  );
 }
 
 const scenarioCopy: Record<ScenarioKey, { title: string; summary: string; tags: string[] }> = {
@@ -153,6 +363,7 @@ const scenarioCopy: Record<ScenarioKey, { title: string; summary: string; tags: 
 };
 
 export default function Home() {
+  const [flow, setFlow] = useState<Flow>("plan");
   const [prompt, setPrompt] = useState(quickPrompts[0]);
   const [amount, setAmount] = useState("1850");
   const [scenario, setScenario] = useState<ScenarioKey>("conference");
@@ -277,6 +488,12 @@ export default function Home() {
         </aside>
 
         <section className="main-panel">
+          <nav className="flow-switch" aria-label="FundGuide workflows">
+            <button className={flow === "plan" ? "active" : ""} onClick={() => setFlow("plan")}><span className="flow-icon">＋</span><span><strong>Plan an expense</strong><small>Choose a funding source before spending</small></span></button>
+            <button className={flow === "transactions" ? "active" : ""} onClick={() => setFlow("transactions")}><span className="flow-icon">↺</span><span><strong>Review card transactions</strong><small>Learn from history and correct allocations</small></span></button>
+          </nav>
+
+          {flow === "transactions" ? <TransactionReview /> : <>
           <div className="intro">
             <span className="eyebrow">Allocation assistant</span>
             <h1>Where should this expense go?</h1>
@@ -367,6 +584,7 @@ export default function Home() {
           )}
 
           <p className="disclaimer">FundGuide supports planning decisions; it does not replace award terms, finance review, or required approvals. Prototype balances and grant-specific matches are illustrative.</p>
+          </>}
         </section>
       </div>
 
