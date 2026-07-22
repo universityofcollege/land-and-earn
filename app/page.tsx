@@ -1,627 +1,339 @@
 "use client";
 
-import { type ChangeEvent, type DragEvent, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import type { DashboardData, EmployerSummary, PacketSummary, ReminderDraft } from "../lib/types";
 
-type ScenarioKey = "conference" | "equipment" | "training" | "supplies";
+type View = "desk" | "packets" | "employers" | "intake" | "rules" | "reminders";
 
-type Recommendation = {
-  id: string;
-  rank: number;
-  name: string;
-  code: string;
-  score: number;
-  available: number;
-  accent: string;
-  label: string;
-  rationale: string;
-  checks: string[];
-  caution?: string;
-  sources: string[];
+const navItems: { id: View; label: string; mark: string }[] = [
+  { id: "desk", label: "Closeout desk", mark: "⌂" },
+  { id: "packets", label: "Reimbursements", mark: "▤" },
+  { id: "employers", label: "Employer funding", mark: "$" },
+  { id: "intake", label: "Document intake", mark: "↑" },
+  { id: "rules", label: "Eligibility rules", mark: "§" },
+  { id: "reminders", label: "Reminder drafts", mark: "✉" },
+];
+
+const statusLabels: Record<string, string> = {
+  follow_up_required: "Follow-up required",
+  needs_review: "Needs review",
+  ready_for_approval: "Ready for approval",
+  invoice_not_received: "Invoice not received",
+  approved: "Approved",
+  paid: "Paid",
+  processing: "Processing",
 };
 
-type Flow = "plan" | "transactions";
-type TransactionStatus = "aligned" | "change" | "review";
-
-type Transaction = {
-  id: string;
-  date: string;
-  merchant: string;
-  category: string;
-  amount: number;
-  currentFund: string;
-  recommendedFund: string;
-  confidence: number;
-  status: TransactionStatus;
-  reason: string;
+const activityColors: Record<string, string> = {
+  "Job placement": "var(--pine)",
+  "Community engagement": "var(--river)",
+  Storytelling: "var(--gold)",
+  "Soft skills": "var(--clay)",
 };
 
-const projectBalances = [
-  { name: "FSCS — East TX", code: "1026-03", available: 68420, health: 68 },
-  { name: "Promise Neighborhoods — Letcher", code: "1016-04", available: 42180, health: 42 },
-  { name: "FSCS — Breathitt & Knott", code: "1023-03", available: 31760, health: 32 },
-  { name: "Unrestricted operations", code: "OPS-01", available: 95700, health: 83 },
-];
-
-const baseRecommendations: Recommendation[] = [
-  {
-    id: "east-tx",
-    rank: 1,
-    name: "Full Service Community Schools — East TX",
-    code: "1026-03",
-    score: 94,
-    available: 68420,
-    accent: "teal",
-    label: "Best fit",
-    rationale:
-      "The activity supports current project delivery and falls inside the 2026 grant period. Training, conference participation, and related travel are generally allowable when they directly benefit the award.",
-    checks: ["Program benefit is direct", "Within period of performance", "Budget capacity available"],
-    caution: "Document the connection to an approved grant activity before booking.",
-    sources: ["2 CFR 200.473 — Training", "2 CFR 200.475 — Travel", "Cost Principles Reference Sheet"],
-  },
-  {
-    id: "letcher",
-    rank: 2,
-    name: "Promise Neighborhoods — Letcher",
-    code: "1016-04",
-    score: 82,
-    available: 42180,
-    accent: "blue",
-    label: "Strong alternative",
-    rationale:
-      "This is a viable alternative if the conference content advances Promise Neighborhoods outcomes. The cost must be allocated in proportion to the benefit received by this award.",
-    checks: ["Expense type allowable", "Active grant year", "Alternative funding available"],
-    caution: "Split the cost if more than one project receives material benefit.",
-    sources: ["2 CFR 200.403 — Allowability", "2 CFR 200.405 — Allocability", "Cost Principles Reference Sheet"],
-  },
-  {
-    id: "ops",
-    rank: 3,
-    name: "Unrestricted operating funds",
-    code: "OPS-01",
-    score: 69,
-    available: 95700,
-    accent: "violet",
-    label: "Low-risk fallback",
-    rationale:
-      "Use unrestricted funds if the activity has broad organizational benefit, lacks a documented grant connection, or presents supplement-not-supplant risk.",
-    checks: ["No federal allowability constraint", "No grant-purpose documentation needed", "Capacity available"],
-    sources: ["Supplement-Not-Supplant Guidance", "PRI Purchasing Policy PR001"],
-  },
-];
-
-const sourceLibrary = [
-  {
-    title: "Cost Principles Reference Sheet",
-    type: "DOCX",
-    detail: "Allowability by expense type",
-    excerpt: "Costs must be necessary, reasonable, allowable, and allocable. Training and education costs are allowable; travel is generally allowable when reasonable and related to the grant.",
-  },
-  {
-    title: "2025 Purchasing Policy",
-    type: "PDF",
-    detail: "Policy PR001 · effective Jan 1, 2025",
-    excerpt: "Purchases under $5,000 require a price analysis. Purchases from $5,000 to $49,999.99 require a bid waiver or at least two written quotes, unless a preferred provider is used.",
-  },
-  {
-    title: "Supplement-Not-Supplant Guidance",
-    type: "DOCX",
-    detail: "Discretionary federal grants",
-    excerpt: "Ask whether the organization would have paid for the activity with non-Federal funds if the grant did not exist. If yes, the cost may be supplanting.",
-  },
-  {
-    title: "Subset federal projects",
-    type: "XLSX",
-    detail: "9 active 2026 project-fund years",
-    excerpt: "Project codes and grant periods used to screen recommendations for the active period of performance.",
-  },
-  {
-    title: "Notes from BRUMAN EDGAR",
-    type: "DOCX",
-    detail: "PRI-specific compliance context",
-    excerpt: "Follow the more restrictive procurement threshold. Prior authorization requests must be vetted with PRI leadership before contacting the program officer.",
-  },
-];
-
-const quickPrompts = [
-  "I’m attending an out-of-state conference",
-  "We need laptops for program staff",
-  "A partner is delivering staff training",
-  "I need to order student activity supplies",
-];
-
-const sampleTransactions: Transaction[] = [
-  { id: "tx-1", date: "2026-06-04", merchant: "Delta Air Lines", category: "Travel", amount: 486.2, currentFund: "OPS-01", recommendedFund: "1026-03", confidence: 94, status: "change", reason: "Conference travel is grant-related and falls within the active project period." },
-  { id: "tx-2", date: "2026-06-05", merchant: "Marriott Downtown", category: "Travel", amount: 782.44, currentFund: "1026-03", recommendedFund: "1026-03", confidence: 92, status: "aligned", reason: "Lodging supports the same documented conference activity." },
-  { id: "tx-3", date: "2026-06-09", merchant: "Staples Business", category: "Program supplies", amount: 318.67, currentFund: "1016-04", recommendedFund: "1016-04", confidence: 88, status: "aligned", reason: "Materials align to Promise Neighborhoods participant activities." },
-  { id: "tx-4", date: "2026-06-12", merchant: "Bluegrass Technology", category: "Equipment", amount: 4298, currentFund: "1026-03", recommendedFund: "1026-03", confidence: 79, status: "review", reason: "Likely allowable, but written technology approval and equipment treatment must be confirmed." },
-  { id: "tx-5", date: "2026-06-18", merchant: "Civic Learning Institute", category: "Training", amount: 1850, currentFund: "OPS-01", recommendedFund: "1023-03", confidence: 87, status: "change", reason: "The training description most closely matches Breathitt & Knott project delivery." },
-  { id: "tx-6", date: "2026-06-21", merchant: "The Copper Bar", category: "Meals & incidentals", amount: 94.18, currentFund: "1026-03", recommendedFund: "OPS-01", confidence: 98, status: "change", reason: "Alcoholic beverages are unallowable on federal awards; move to unrestricted funds after review." },
-  { id: "tx-7", date: "2026-06-24", merchant: "Adobe Systems", category: "Software", amount: 239.88, currentFund: "OPS-01", recommendedFund: "OPS-01", confidence: 73, status: "review", reason: "Broad organizational benefit is likely; confirm Information Systems approval and allocation basis." },
-  { id: "tx-8", date: "2026-06-27", merchant: "USPS", category: "Program supplies", amount: 76.42, currentFund: "1026-03", recommendedFund: "1026-03", confidence: 91, status: "aligned", reason: "Transportation and postage for program materials are generally allowable." },
-];
-
-function money(value: number) {
+function money(value: number, cents = false) {
   return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
+    style: "currency", currency: "USD", maximumFractionDigits: cents ? 2 : 0,
   }).format(value);
 }
 
-function classify(text: string): ScenarioKey {
-  const lower = text.toLowerCase();
-  if (/laptop|computer|equipment|tablet|technology/.test(lower)) return "equipment";
-  if (/training|trainer|workshop|speaker/.test(lower)) return "training";
-  if (/suppl|book|material|ticket/.test(lower)) return "supplies";
-  return "conference";
+function shortDate(value: string | null) {
+  if (!value) return "Not received";
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(`${value.slice(0, 10)}T12:00:00`));
 }
 
-function currency(value: number) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(value);
+function titleCase(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function recommendationFor(merchant: string, currentFund: string, amount: number): Omit<Transaction, "id" | "date" | "merchant" | "amount" | "currentFund"> {
-  const value = merchant.toLowerCase();
-  if (/bar|liquor|wine|brew|alcohol/.test(value)) return { category: "Meals & incidentals", recommendedFund: "OPS-01", confidence: 98, status: currentFund === "OPS-01" ? "review" : "change", reason: "Potential alcohol expense: federal awards prohibit alcoholic beverages. Route to unrestricted funds for review." };
-  if (/air|delta|united|hotel|marriott|hilton|conference|uber|lyft|rental car/.test(value)) return { category: "Travel", recommendedFund: "1026-03", confidence: 92, status: currentFund === "1026-03" ? "aligned" : "change", reason: "Historical pattern and expense type indicate project-related travel; retain supporting business purpose." };
-  if (/laptop|computer|technology|software|adobe|microsoft/.test(value)) return { category: amount >= 1000 ? "Equipment" : "Software", recommendedFund: currentFund === "Uncoded" ? "1026-03" : currentFund, confidence: 78, status: "review", reason: "Technology may be allowable, but written Information Systems approval and the allocation basis must be verified." };
-  if (/training|institute|workshop|speaker/.test(value)) return { category: "Training", recommendedFund: "1023-03", confidence: 87, status: currentFund === "1023-03" ? "aligned" : "change", reason: "Training is generally allowable when it directly supports award delivery; confirm contract documentation." };
-  if (/staples|supply|book|usps|material/.test(value)) return { category: "Program supplies", recommendedFund: currentFund === "Uncoded" ? "1016-04" : currentFund, confidence: 88, status: currentFund === "Uncoded" ? "review" : "aligned", reason: "Materials and related delivery costs are generally allowable when necessary for the award." };
-  return { category: "Other", recommendedFund: currentFund === "Uncoded" ? "OPS-01" : currentFund, confidence: 64, status: "review", reason: "The transaction description does not establish a clear program benefit. Add a business purpose before allocation." };
+function StatusPill({ status }: { status: string }) {
+  return <span className={`status-pill status-${status}`}>{statusLabels[status] ?? titleCase(status)}</span>;
 }
 
-function normalizeUploadedRows(rows: Record<string, unknown>[]): Transaction[] {
-  const valueFor = (row: Record<string, unknown>, patterns: RegExp[]) => {
-    const entry = Object.entries(row).find(([key]) => patterns.some((pattern) => pattern.test(key.toLowerCase())));
-    return entry?.[1];
-  };
-  return rows.slice(0, 150).map((row, index) => {
-    const merchant = String(valueFor(row, [/merchant/, /description/, /vendor/, /transaction/]) ?? `Transaction ${index + 1}`);
-    const rawAmount = valueFor(row, [/^amount$/, /transaction amount/, /debit/, /charge/]);
-    const amount = Math.abs(Number(String(rawAmount ?? 0).replace(/[$,()]/g, ""))) || 0;
-    const dateValue = valueFor(row, [/transaction date/, /posting date/, /^date$/]);
-    const parsedDate = dateValue instanceof Date ? dateValue : new Date(String(dateValue ?? ""));
-    const date = Number.isNaN(parsedDate.getTime()) ? "Date not provided" : parsedDate.toISOString().slice(0, 10);
-    const currentFund = String(valueFor(row, [/fund/, /project/, /account/, /coding/]) ?? "Uncoded").trim() || "Uncoded";
-    const suggested = recommendationFor(merchant, currentFund, amount);
-    return { id: `upload-${index}`, date, merchant, amount, currentFund, ...suggested };
-  }).filter((row) => row.amount > 0 || !row.merchant.startsWith("Transaction "));
+function LoadingDesk() {
+  return <div className="loading-desk" role="status" aria-label="Loading Land and Earn">
+    <div className="loading-brand"><span>LE</span><i /></div>
+    <p>Opening the reimbursement desk…</p>
+  </div>;
 }
 
-function TransactionReview() {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [transactions, setTransactions] = useState<Transaction[] | null>(null);
-  const [fileName, setFileName] = useState("");
-  const [isParsing, setIsParsing] = useState(false);
-  const [uploadError, setUploadError] = useState("");
-  const [filter, setFilter] = useState<"all" | TransactionStatus>("all");
-  const [selectedRows, setSelectedRows] = useState<string[]>([]);
-  const [staged, setStaged] = useState(false);
-
-  const analyzeFile = async (file: File) => {
-    setUploadError("");
-    setIsParsing(true);
-    try {
-      const XLSX = await import("xlsx");
-      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
-      const normalized = normalizeUploadedRows(rows);
-      if (!normalized.length) throw new Error("No transaction rows found");
-      setTransactions(normalized);
-      setFileName(file.name);
-      setSelectedRows([]);
-      setStaged(false);
-    } catch {
-      setUploadError("We couldn’t find transaction rows. Export the card activity with Date, Description, and Amount columns, then try again.");
-    } finally {
-      setIsParsing(false);
-    }
-  };
-
-  const chooseFile = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) void analyzeFile(file);
-  };
-
-  const dropFile = (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const file = event.dataTransfer.files?.[0];
-    if (file) void analyzeFile(file);
-  };
-
-  const loadSample = () => {
-    setTransactions(sampleTransactions);
-    setFileName("June_2026_card_activity.xlsx");
-    setSelectedRows([]);
-    setUploadError("");
-    setStaged(false);
-  };
-
-  const stats = useMemo(() => {
-    if (!transactions) return null;
-    const total = transactions.reduce((sum, row) => sum + row.amount, 0);
-    const aligned = transactions.filter((row) => row.status === "aligned").length;
-    const changes = transactions.filter((row) => row.status === "change").length;
-    const reviews = transactions.filter((row) => row.status === "review").length;
-    return { total, aligned, changes, reviews, alignedRate: Math.round((aligned / transactions.length) * 100) };
-  }, [transactions]);
-
-  const visibleTransactions = transactions?.filter((row) => filter === "all" || row.status === filter) ?? [];
-  const toggleRow = (id: string) => setSelectedRows((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const corrections = transactions?.filter((row) => row.status === "change") ?? [];
-
-  return (
-    <>
-      <div className="intro transaction-intro">
-        <span className="eyebrow">Historical allocation review</span>
-        <h1>Turn card activity into funding decisions.</h1>
-        <p>Upload a card transaction export. FundGuide will learn from the spending pattern, test each charge against the funding rules, and identify likely reallocations.</p>
-      </div>
-
-      {!transactions ? (
-        <>
-          <div className={`upload-zone ${isParsing ? "parsing" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={dropFile}>
-            <input ref={inputRef} type="file" accept=".csv,.tsv,.xlsx,.xls" onChange={chooseFile} hidden />
-            <div className="upload-mark" aria-hidden="true"><span>↑</span><i /></div>
-            <span className="eyebrow">Card activity export</span>
-            <h2>{isParsing ? "Reading transactions…" : "Drop a spreadsheet here"}</h2>
-            <p>CSV or Excel · Date, description, and amount are enough to begin</p>
-            <div className="upload-actions">
-              <button className="upload-primary" onClick={() => inputRef.current?.click()} disabled={isParsing}>{isParsing ? "Analyzing…" : "Choose transaction file"}</button>
-              <button className="upload-secondary" onClick={loadSample} disabled={isParsing}>Use sample activity</button>
-            </div>
-          </div>
-          {uploadError && <div className="upload-error" role="alert"><strong>Check the export format</strong><span>{uploadError}</span></div>}
-          <div className="review-steps">
-            <div><span>01</span><strong>Match the columns</strong><p>Date, merchant, amount, and current funding code are detected automatically.</p></div>
-            <div><span>02</span><strong>Apply the rules</strong><p>Each charge is checked for allowability, timing, approvals, and historical fit.</p></div>
-            <div><span>03</span><strong>Stage corrections</strong><p>Program directors can send proposed reclassifications to finance with the evidence attached.</p></div>
-          </div>
-          <div className="local-processing-note"><span>✓</span><p><strong>Prototype privacy</strong> Files are processed in this browser session and are not retained after the page is closed.</p></div>
-        </>
-      ) : (
-        <div className="transaction-results">
-          <div className="file-strip">
-            <div className="file-badge">XLS</div>
-            <div><strong>{fileName}</strong><span>{transactions.length} transactions recognized</span></div>
-            <div className="file-strip-actions"><span className="analysis-complete"><i /> Analysis complete</span><button onClick={() => inputRef.current?.click()}>Replace file</button></div>
-            <input ref={inputRef} type="file" accept=".csv,.tsv,.xlsx,.xls" onChange={chooseFile} hidden />
-          </div>
-
-          {stats && <div className="transaction-stats">
-            <div className="stat-total"><span>Total reviewed</span><strong>{currency(stats.total)}</strong><small>across {transactions.length} charges</small></div>
-            <div><span>Likely aligned</span><strong>{stats.alignedRate}%</strong><small>{stats.aligned} transactions</small></div>
-            <div><span>Move suggested</span><strong>{stats.changes}</strong><small>coding changes</small></div>
-            <div><span>Needs context</span><strong>{stats.reviews}</strong><small>director review</small></div>
-          </div>}
-
-          <div className="history-insight">
-            <div className="insight-mark">✦</div>
-            <div><span className="eyebrow">Historical pattern</span><h3>Travel is consistently charged to project funds; training is split across operations and programs.</h3><p>The strongest correction opportunity is to move documented program training and conference travel from unrestricted operations to the benefiting award.</p></div>
-            <div className="category-bars"><span><i style={{ width: "74%" }} />Travel <b>41%</b></span><span><i style={{ width: "51%" }} />Training <b>28%</b></span><span><i style={{ width: "32%" }} />Supplies <b>18%</b></span></div>
-          </div>
-
-          <div className="table-heading">
-            <div><span className="eyebrow">Transaction recommendations</span><h2>Review the proposed funding path</h2></div>
-            <div className="table-filters">
-              {(["all", "change", "review", "aligned"] as const).map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item === "all" ? "All" : item === "change" ? "Moves" : item === "review" ? "Review" : "Aligned"}</button>)}
-            </div>
-          </div>
-
-          <div className="transaction-table-wrap">
-            <table className="transaction-table">
-              <thead><tr><th aria-label="Select" /><th>Transaction</th><th>Amount</th><th>Current</th><th>Recommended path</th><th>Match</th><th>Status</th></tr></thead>
-              <tbody>{visibleTransactions.map((row) => (
-                <tr key={row.id} className={selectedRows.includes(row.id) ? "selected" : ""}>
-                  <td><input type="checkbox" checked={selectedRows.includes(row.id)} onChange={() => toggleRow(row.id)} aria-label={`Select ${row.merchant}`} /></td>
-                  <td><strong>{row.merchant}</strong><span>{row.date} · {row.category}</span><small>{row.reason}</small></td>
-                  <td className="transaction-amount">{currency(row.amount)}</td>
-                  <td><code>{row.currentFund}</code></td>
-                  <td><code className="recommended-code">{row.recommendedFund}</code>{row.currentFund !== row.recommendedFund && <span className="move-arrow">→ move</span>}</td>
-                  <td><strong className="confidence">{row.confidence}%</strong></td>
-                  <td><span className={`status status-${row.status}`}>{row.status === "change" ? "Move" : row.status === "review" ? "Review" : "Aligned"}</span></td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
-
-          <div className="transaction-actions">
-            <span>{selectedRows.length ? `${selectedRows.length} selected` : `${corrections.length} suggested corrections`}</span>
-            <div><button className="evidence-button">Export review</button><button className="analyze-button" onClick={() => setStaged(true)}>Stage {selectedRows.length || corrections.length} corrections <span>→</span></button></div>
-          </div>
-
-          {staged && <div className="success-banner" role="status"><span>✓</span><div><strong>Corrections staged for finance review</strong><p>{selectedRows.length || corrections.length} allocation proposals include the rule rationale and source evidence.</p></div><button onClick={() => setStaged(false)}>Dismiss</button></div>}
-        </div>
-      )}
-      <p className="disclaimer">FundGuide recommends funding paths from the available policy context and historical patterns. Finance must verify final account coding, documentation, and required approvals.</p>
-    </>
-  );
+function EmptyMessage({ title, body }: { title: string; body: string }) {
+  return <div className="empty-message"><span>○</span><strong>{title}</strong><p>{body}</p></div>;
 }
 
-const scenarioCopy: Record<ScenarioKey, { title: string; summary: string; tags: string[] }> = {
-  conference: {
-    title: "Conference travel",
-    summary: "Out-of-state conference attendance with registration and travel costs.",
-    tags: ["Travel", "Training", "Out of state"],
-  },
-  equipment: {
-    title: "Technology equipment",
-    summary: "Computing equipment intended to support program delivery.",
-    tags: ["Equipment", "Technology", "Prior approval"],
-  },
-  training: {
-    title: "Professional service · training",
-    summary: "External training service intended to build staff capacity.",
-    tags: ["Service", "Training", "Contract"],
-  },
-  supplies: {
-    title: "Program supplies",
-    summary: "Tangible materials intended for project activities or participants.",
-    tags: ["Goods", "Program materials", "Price analysis"],
-  },
-};
+function FundingRibbon({ employers, onSelect }: { employers: EmployerSummary[]; onSelect: (employer: EmployerSummary) => void }) {
+  return <section className="funding-ribbon" aria-label="Employer purchase order utilization">
+    <div className="ribbon-head">
+      <div><span className="section-kicker">Purchase order runway</span><h2>Funding left by employer</h2></div>
+      <p>Invoices reserve funding the moment they arrive.</p>
+    </div>
+    <div className="ribbon-track">
+      {employers.map((employer) => <button key={employer.id} className="ribbon-segment" onClick={() => onSelect(employer)}>
+        <span className="ribbon-label"><b>{employer.name.replace(" Independent Schools", " Schools").replace(" Community", "")}</b><small>{employer.poNumber}</small></span>
+        <span className="ribbon-bar"><i style={{ width: `${Math.min(employer.utilization, 100)}%` }} /></span>
+        <span className="ribbon-values"><strong>{money(employer.available)}</strong><small>{employer.utilization}% committed</small></span>
+      </button>)}
+    </div>
+  </section>;
+}
 
-export default function Home() {
-  const [flow, setFlow] = useState<Flow>("plan");
-  const [prompt, setPrompt] = useState(quickPrompts[0]);
-  const [amount, setAmount] = useState("1850");
-  const [scenario, setScenario] = useState<ScenarioKey>("conference");
-  const [hasRun, setHasRun] = useState(true);
-  const [selected, setSelected] = useState<Recommendation | null>(null);
-  const [sourcesOpen, setSourcesOpen] = useState(false);
-  const [confirmed, setConfirmed] = useState<Recommendation | null>(null);
-  const [profile, setProfile] = useState("Community Schools · Programs");
+function PacketRow({ packet, onOpen }: { packet: PacketSummary; onOpen: (packet: PacketSummary) => void }) {
+  const openBlockers = packet.exceptions.filter((item) => item.status === "open" && item.severity === 1).length;
+  return <button className="packet-row" onClick={() => onOpen(packet)}>
+    <span className={`priority-mark priority-${packet.priority}`}>{packet.priority === 1 ? "P1" : packet.priority === 2 ? "P2" : "P3"}</span>
+    <span className="packet-person"><strong>{packet.internName ?? packet.employerName}</strong><small>{packet.employerName}</small></span>
+    <span className="packet-period"><strong>{shortDate(packet.periodStart)}–{shortDate(packet.periodEnd)}</strong><small>{packet.invoiceNumber ?? "Invoice missing"}</small></span>
+    <span className="packet-proof"><strong>{packet.documents.length || "—"}</strong><small>documents</small></span>
+    <span className="packet-amount"><strong>{packet.invoiceAmount ? money(packet.invoiceAmount) : "—"}</strong><small>{openBlockers ? `${openBlockers} blocker${openBlockers > 1 ? "s" : ""}` : `${packet.confidence}% confidence`}</small></span>
+    <StatusPill status={packet.status} />
+    <span className="row-arrow">→</span>
+  </button>;
+}
 
-  const recommendations = useMemo(() => {
-    const next = baseRecommendations.map((item) => ({ ...item, checks: [...item.checks] }));
-    if (scenario === "equipment") {
-      next[0].score = 86;
-      next[0].rationale = "Computing devices may be allowable when necessary for award performance, but equipment and technology purchases require documented approval before purchase.";
-      next[0].caution = "Obtain written Information Systems approval and confirm whether federal prior approval is required.";
-      next[0].sources = ["2 CFR 200.439 — Equipment", "2 CFR 200.453 — Computing devices", "PRI Purchasing Policy PR001"];
-    }
-    if (scenario === "training") {
-      next[0].score = 91;
-      next[0].rationale = "Training is generally allowable and can directly support award delivery. Because an outside trainer is a service provider, an executed contract is normally required.";
-      next[0].caution = "Submit a Purchase Request before committing; Purchasing performs the service cost analysis.";
-      next[0].sources = ["2 CFR 200.473 — Training", "PRI Purchasing Policy PR001 · Services", "Notes from BRUMAN EDGAR"];
-    }
-    if (scenario === "supplies") {
-      next[0].score = 96;
-      next[0].rationale = "Program materials and supplies are allowable when necessary for award performance and tied to approved activities. The requestor must document price reasonableness.";
-      next[0].caution = "Apply the supplement-not-supplant test if these materials were previously paid from non-Federal funds.";
-      next[0].sources = ["2 CFR 200.453 — Materials and supplies", "Supplement-Not-Supplant Guidance", "PRI Purchasing Policy PR001"];
-    }
-    return next;
-  }, [scenario]);
+function Queue({ packets, onOpen, compact = false }: { packets: PacketSummary[]; onOpen: (packet: PacketSummary) => void; compact?: boolean }) {
+  return <div className={`queue ${compact ? "queue-compact" : ""}`}>
+    <div className="queue-labels" aria-hidden="true"><span>Priority</span><span>Intern / employer</span><span>Coverage</span><span>Evidence</span><span>Amount</span><span>Status</span><span /></div>
+    {packets.length ? packets.map((packet) => <PacketRow key={packet.id} packet={packet} onOpen={onOpen} />) : <EmptyMessage title="No packets match" body="Change the filter or add a reimbursement packet." />}
+  </div>;
+}
 
-  const runAnalysis = () => {
-    if (!prompt.trim()) return;
-    setHasRun(false);
-    window.setTimeout(() => {
-      setScenario(classify(prompt));
-      setHasRun(true);
-      setConfirmed(null);
-    }, 420);
-  };
+function DeskView({ data, onPacket, onEmployer, onReminder, go }: { data: DashboardData; onPacket: (packet: PacketSummary) => void; onEmployer: (employer: EmployerSummary) => void; onReminder: (reminder: ReminderDraft) => void; go: (view: View) => void }) {
+  const totalFunding = data.employers.reduce((sum, item) => sum + item.currentFunding, 0);
+  const totalAvailable = data.employers.reduce((sum, item) => sum + item.available, 0);
+  const blockers = data.packets.flatMap((packet) => packet.exceptions).filter((item) => item.status === "open" && item.severity === 1).length;
+  const readyAmount = data.packets.filter((packet) => ["ready_for_approval", "approved"].includes(packet.status)).reduce((sum, packet) => sum + packet.invoiceAmount, 0);
+  const priorityPackets = data.packets.filter((packet) => !["paid"].includes(packet.status)).slice(0, 4);
+  const draftReminders = data.reminders.filter((reminder) => reminder.status === "draft");
 
-  const applyPrompt = (value: string) => {
-    setPrompt(value);
-    setScenario(classify(value));
-    setHasRun(true);
-    setConfirmed(null);
-  };
+  return <>
+    <header className="view-header desk-header">
+      <div><span className="view-eyebrow">FY26 closeout · Land and Earn</span><h1>Get every employer reimbursed.</h1><p>The desk surfaces the next action, protects purchase-order funding, and keeps every decision tied to its evidence.</p></div>
+      <button className="primary-action" onClick={() => go("intake")}><span>↑</span> Add documents</button>
+    </header>
 
-  const confirmAllocation = () => {
-    if (!selected) return;
-    setConfirmed(selected);
-    setSelected(null);
-  };
+    <section className="closeout-ledger">
+      <div className="ledger-primary"><span>Current funding available</span><strong>{money(totalAvailable)}</strong><small>of {money(totalFunding)} across {data.employers.length} employers</small></div>
+      <div className="ledger-rule"><i /><span>Invoices due</span><strong>June 30</strong><small>Payment by July 31</small></div>
+      <div className="ledger-stat danger"><span>Payment blockers</span><strong>{blockers}</strong><small>must be cleared first</small></div>
+      <div className="ledger-stat"><span>Ready to move</span><strong>{money(readyAmount)}</strong><small>approved or ready</small></div>
+      <div className="ledger-rate"><span>Program wage</span><strong>{money(data.hourlyRate, true)}</strong><small>per hour · all interns</small></div>
+    </section>
 
-  const amountValue = Number(amount) || 0;
-  const scenarioInfo = scenarioCopy[scenario];
+    <FundingRibbon employers={data.employers} onSelect={onEmployer} />
 
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="FundGuide home">
-          <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
-          <span>FundGuide</span>
-        </a>
-        <div className="topbar-center">
-          <span className="prototype-pill"><span /> Prototype workspace</span>
-          <span className="last-sync">5 sources indexed · Jul 22, 2026</span>
-        </div>
-        <div className="profile-control">
-          <span className="avatar">CH</span>
-          <label>
-            <span>Working profile</span>
-            <select value={profile} onChange={(event) => setProfile(event.target.value)}>
-              <option>Community Schools · Programs</option>
-              <option>Promise Neighborhoods · Programs</option>
-              <option>Finance & Grant Services</option>
-            </select>
-          </label>
-        </div>
-      </header>
+    <div className="desk-grid">
+      <section className="work-queue panel">
+        <div className="panel-heading"><div><span className="section-kicker">Do next</span><h2>Closeout queue</h2></div><button className="text-action" onClick={() => go("packets")}>See all reimbursements →</button></div>
+        <Queue packets={priorityPackets} onOpen={onPacket} compact />
+      </section>
+      <aside className="reminder-stack panel">
+        <div className="panel-heading"><div><span className="section-kicker">Never auto-sent</span><h2>Reminder drafts</h2></div><span className="count-badge">{draftReminders.length}</span></div>
+        {draftReminders.length ? draftReminders.map((reminder) => <button key={reminder.id} className="reminder-card" onClick={() => onReminder(reminder)}>
+          <span className="mail-mark">✉</span><span><strong>{reminder.employerName}</strong><small>{reminder.subject}</small></span><i>Review</i>
+        </button>) : <EmptyMessage title="No drafts waiting" body="New deadline and exception drafts will appear here." />}
+      </aside>
+    </div>
+  </>;
+}
 
-      <div className="workspace" id="top">
-        <aside className="side-panel">
-          <div className="side-heading">
-            <div>
-              <span className="eyebrow">Funding snapshot</span>
-              <h2>Active pools</h2>
-            </div>
-            <button className="icon-button" aria-label="Funding pool options">•••</button>
-          </div>
-          <p className="sample-note">Illustrative balances for prototype validation</p>
-          <div className="balance-list">
-            {projectBalances.map((project) => (
-              <div className="balance-item" key={project.code}>
-                <div className="balance-title">
-                  <span>{project.name}</span>
-                  <strong>{money(project.available)}</strong>
-                </div>
-                <div className="balance-meta"><code>{project.code}</code><span>available</span></div>
-                <div className="balance-track"><span style={{ width: `${project.health}%` }} /></div>
-              </div>
-            ))}
-          </div>
+function PacketsView({ data, onPacket }: { data: DashboardData; onPacket: (packet: PacketSummary) => void }) {
+  const [filter, setFilter] = useState("open");
+  const [search, setSearch] = useState("");
+  const filtered = data.packets.filter((packet) => {
+    const matchesFilter = filter === "all" || (filter === "open" ? !["paid", "approved"].includes(packet.status) : packet.status === filter);
+    const haystack = `${packet.internName} ${packet.employerName} ${packet.invoiceNumber}`.toLowerCase();
+    return matchesFilter && haystack.includes(search.toLowerCase());
+  });
+  return <>
+    <header className="view-header"><div><span className="view-eyebrow">Reimbursement packets</span><h1>Evidence before payment.</h1><p>Every invoice, wage record, expense, exception, and approval in one auditable place.</p></div></header>
+    <div className="toolbar">
+      <label className="search-field"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search intern, employer, or invoice" /></label>
+      <div className="filter-pills">{[
+        ["open", "Open"], ["follow_up_required", "Follow-up"], ["needs_review", "Needs review"], ["ready_for_approval", "Ready"], ["approved", "Approved"], ["all", "All"],
+      ].map(([value, label]) => <button key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{label}</button>)}</div>
+    </div>
+    <section className="panel queue-panel"><div className="panel-heading"><div><span className="section-kicker">{filtered.length} packets</span><h2>{filter === "open" ? "Active reimbursement work" : statusLabels[filter] ?? "All reimbursement work"}</h2></div></div><Queue packets={filtered} onOpen={onPacket} /></section>
+  </>;
+}
 
-          <div className="side-rule" />
-          <button className="source-link" onClick={() => setSourcesOpen(true)}>
-            <span className="source-icon" aria-hidden="true">≡</span>
-            <span><strong>Source library</strong><small>5 documents · 9 projects</small></span>
-            <b aria-hidden="true">→</b>
-          </button>
-
-          <div className="guardrail-card">
-            <span className="guardrail-icon" aria-hidden="true">✓</span>
-            <div><strong>Policy guardrails on</strong><p>Recommendations are screened for allowability, allocability, timing, procurement, and SNS risk.</p></div>
-          </div>
-
-          <div className="side-footer">
-            <button>Decision history</button>
-            <button>Prototype notes</button>
-          </div>
-        </aside>
-
-        <section className="main-panel">
-          <nav className="flow-switch" aria-label="FundGuide workflows">
-            <button className={flow === "plan" ? "active" : ""} onClick={() => setFlow("plan")}><span className="flow-icon">＋</span><span><strong>Plan an expense</strong><small>Choose a funding source before spending</small></span></button>
-            <button className={flow === "transactions" ? "active" : ""} onClick={() => setFlow("transactions")}><span className="flow-icon">↺</span><span><strong>Review card transactions</strong><small>Learn from history and correct allocations</small></span></button>
-          </nav>
-
-          {flow === "transactions" ? <TransactionReview /> : <>
-          <div className="intro">
-            <span className="eyebrow">Allocation assistant</span>
-            <h1>Where should this expense go?</h1>
-            <p>Describe what you plan to purchase. FundGuide will compare grant rules, project timing, policy thresholds, and available capacity.</p>
-          </div>
-
-          <div className="composer" aria-label="Expense description">
-            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the expense, purpose, and who benefits…" />
-            <div className="composer-row">
-              <label className="amount-field"><span>$</span><input aria-label="Estimated amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value.replace(/[^0-9.]/g, ""))} /><small>estimated</small></label>
-              <label className="date-field"><span>Needed by</span><input type="date" defaultValue="2026-09-18" /></label>
-              <button className="analyze-button" onClick={runAnalysis} disabled={!prompt.trim() || !hasRun}>
-                {hasRun ? "Find funding options" : "Reviewing sources…"}<span aria-hidden="true">→</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="quick-prompts" aria-label="Example expense prompts">
-            <span>Try an example</span>
-            <div>
-              {quickPrompts.map((item, index) => (
-                <button key={item} onClick={() => applyPrompt(item)} className={prompt === item ? "active" : ""}>{["Conference", "Laptops", "Staff training", "Supplies"][index]}</button>
-              ))}
-            </div>
-          </div>
-
-          <div className={`analysis-area ${hasRun ? "ready" : "loading"}`} aria-live="polite">
-            {!hasRun ? (
-              <div className="analysis-loading">
-                <span className="spinner" />
-                <div><strong>Reviewing five policy sources</strong><p>Checking purpose, period, cost rules, and funding alternatives…</p></div>
-              </div>
-            ) : (
-              <>
-                <div className="understanding-card">
-                  <div className="understanding-label"><span aria-hidden="true">✦</span> Understood as</div>
-                  <div className="understanding-copy">
-                    <div><h3>{scenarioInfo.title}</h3><p>{scenarioInfo.summary}</p></div>
-                    <div className="tags">{scenarioInfo.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-                  </div>
-                  <div className="screened"><span>Screened</span><strong>{money(amountValue)}</strong><small>against 4 funding pools</small></div>
-                </div>
-
-                <div className="results-heading">
-                  <div><span className="eyebrow">Ranked recommendation</span><h2>Three viable funding paths</h2></div>
-                  <button onClick={() => setSourcesOpen(true)}>View evidence <span>↗</span></button>
-                </div>
-
-                <div className="recommendation-list">
-                  {recommendations.map((recommendation) => (
-                    <article className={`recommendation ${recommendation.rank === 1 ? "featured" : ""}`} key={recommendation.id}>
-                      <div className={`rank rank-${recommendation.accent}`}>{recommendation.rank}</div>
-                      <div className="recommendation-body">
-                        <div className="recommendation-topline">
-                          <div>
-                            <span className={`fit-label fit-${recommendation.accent}`}>{recommendation.label}</span>
-                            <h3>{recommendation.name}</h3>
-                            <code>{recommendation.code}</code>
-                          </div>
-                          <div className="match-score"><strong>{recommendation.score}%</strong><span>rule match</span></div>
-                        </div>
-                        <p className="rationale">{recommendation.rationale}</p>
-                        <div className="check-row">
-                          {recommendation.checks.map((check) => <span key={check}><i aria-hidden="true">✓</i>{check}</span>)}
-                        </div>
-                        {recommendation.caution && <div className="caution"><b>Before committing</b><span>{recommendation.caution}</span></div>}
-                        <div className="recommendation-footer">
-                          <div className="capacity"><span>Available capacity</span><strong>{money(recommendation.available)}</strong><small>{amountValue > 0 ? `${money(recommendation.available - amountValue)} after this allocation` : "Enter an amount to project balance"}</small></div>
-                          <div className="card-actions">
-                            <button className="evidence-button" onClick={() => setSourcesOpen(true)}>Sources <span>{recommendation.sources.length}</span></button>
-                            <button className="select-button" onClick={() => setSelected(recommendation)}>Use this fund <span>→</span></button>
-                          </div>
-                        </div>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-
-          {confirmed && (
-            <div className="success-banner" role="status">
-              <span aria-hidden="true">✓</span>
-              <div><strong>Allocation added to the planning log</strong><p>{money(amountValue)} · {confirmed.code} · Draft decision for finance review</p></div>
-              <button onClick={() => setConfirmed(null)}>Dismiss</button>
-            </div>
-          )}
-
-          <p className="disclaimer">FundGuide supports planning decisions; it does not replace award terms, finance review, or required approvals. Prototype balances and grant-specific matches are illustrative.</p>
-          </>}
+function EmployerView({ data, selected, onSelect, onPacket }: { data: DashboardData; selected: EmployerSummary | null; onSelect: (item: EmployerSummary | null) => void; onPacket: (packet: PacketSummary) => void }) {
+  if (selected) {
+    const events = data.poEvents.filter((event) => event.purchaseOrderId === selected.purchaseOrderId);
+    const packets = data.packets.filter((packet) => packet.employerId === selected.id);
+    return <>
+      <button className="back-action" onClick={() => onSelect(null)}>← All employers</button>
+      <header className="view-header employer-header"><div><span className="view-eyebrow">{selected.county} · {selected.poNumber}</span><h1>{selected.name}</h1><p>{selected.arrangement} · {selected.paySchedule} payroll</p></div><div className="mou-stamp"><span>MOU current</span><strong>{selected.mouCode}</strong></div></header>
+      <section className="employer-balance">
+        <div className="balance-main"><span>Current funding available</span><strong>{money(selected.available)}</strong><div className="large-funding-bar"><i style={{ width: `${selected.utilization}%` }} /></div><small>{money(selected.committed)} committed of {money(selected.currentFunding)}</small></div>
+        <div><span>Original PO</span><strong>{money(selected.originalFunding)}</strong><small>Issued funding</small></div>
+        <div><span>Amendments</span><strong>{selected.amendmentFunding ? `+${money(selected.amendmentFunding)}` : "—"}</strong><small>Approved changes</small></div>
+        <div><span>Approved</span><strong>{money(selected.approved)}</strong><small>Validated invoices</small></div>
+        <div><span>Paid</span><strong>{money(selected.paid)}</strong><small>Recorded payments</small></div>
+      </section>
+      <div className="employer-detail-grid">
+        <section className="panel"><div className="panel-heading"><div><span className="section-kicker">Funding ledger</span><h2>Purchase order activity</h2></div><code>{selected.poNumber}</code></div>
+          <div className="ledger-list">{events.map((event) => <div key={event.id} className="ledger-event"><span className={`event-mark event-${event.eventType}`}>{event.eventType === "invoice_received" ? "−" : event.eventType === "invoice_paid" ? "✓" : "+"}</span><span><strong>{event.reference}</strong><small>{titleCase(event.eventType)} · {event.actor}</small></span><time>{shortDate(event.occurredAt)}</time><b>{money(event.amount)}</b></div>)}</div>
         </section>
+        <aside className="panel contact-panel"><span className="section-kicker">Primary contact</span><div className="contact-avatar">{selected.contactName.split(" ").map((part) => part[0]).join("")}</div><h3>{selected.contactName}</h3><a href={`mailto:${selected.contactEmail}`}>{selected.contactEmail}</a><dl><div><dt>Payroll cycle</dt><dd>{selected.paySchedule}</dd></div><div><dt>Structure</dt><dd>{selected.arrangement}</dd></div></dl></aside>
       </div>
+      <section className="panel employer-packets"><div className="panel-heading"><div><span className="section-kicker">Linked work</span><h2>Reimbursement packets</h2></div></div><Queue packets={packets} onOpen={onPacket} compact /></section>
+    </>;
+  }
+  return <>
+    <header className="view-header"><div><span className="view-eyebrow">Employer funding</span><h1>Every commitment, in view.</h1><p>Purchase orders are the guardrail. Received invoices reserve funding; corrections leave an audit trail.</p></div></header>
+    <div className="employer-grid">{data.employers.map((employer) => <button key={employer.id} className="employer-card" onClick={() => onSelect(employer)}>
+      <div className="employer-card-head"><span>{employer.county}</span><code>{employer.poNumber}</code></div><h2>{employer.name}</h2><p>{employer.arrangement}</p>
+      <div className="card-funding"><span>Available now</span><strong>{money(employer.available)}</strong><small>of {money(employer.currentFunding)}</small></div>
+      <div className="card-track"><i style={{ width: `${employer.utilization}%` }} /></div>
+      <div className="card-foot"><span><i /> {employer.mouCode}</span><b>{employer.utilization}% committed →</b></div>
+    </button>)}</div>
+  </>;
+}
 
-      {sourcesOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setSourcesOpen(false)}>
-          <section className="source-modal" role="dialog" aria-modal="true" aria-labelledby="sources-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-header"><div><span className="eyebrow">Evidence library</span><h2 id="sources-title">Indexed source set</h2><p>Representative documents supplied for this prototype.</p></div><button className="close-button" onClick={() => setSourcesOpen(false)} aria-label="Close source library">×</button></div>
-            <div className="source-list">
-              {sourceLibrary.map((source, index) => (
-                <article key={source.title}>
-                  <span className="source-number">0{index + 1}</span>
-                  <div><div className="source-title"><h3>{source.title}</h3><span>{source.type}</span></div><small>{source.detail}</small><p>{source.excerpt}</p></div>
-                </article>
-              ))}
-            </div>
-            <div className="modal-foot"><span><i /> Source-grounded prototype</span><button onClick={() => setSourcesOpen(false)}>Return to recommendation</button></div>
-          </section>
+function IntakeView({ data, onUploaded }: { data: DashboardData; onUploaded: () => Promise<unknown> }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setBusy(true); setMessage("");
+    const response = await fetch("/api/documents", { method: "POST", body: new FormData(event.currentTarget) });
+    const result = await response.json() as { error?: string; document?: { fileName: string } };
+    if (!response.ok) setMessage(result.error ?? "Upload failed.");
+    else { setMessage(`${result.document?.fileName ?? "Document"} is in the review queue.`); event.currentTarget.reset(); await onUploaded(); }
+    setBusy(false);
+  };
+  return <>
+    <header className="view-header"><div><span className="view-eyebrow">Document intake</span><h1>Bring the paperwork. Keep the source.</h1><p>Original files are preserved; extracted values stay linked to the exact evidence used.</p></div></header>
+    <div className="intake-layout">
+      <form className="upload-panel" onSubmit={submit}>
+        <div className="upload-drop"><span className="upload-symbol">↑</span><h2>Add reimbursement evidence</h2><p>PDF, image, spreadsheet, or office document</p><input name="file" type="file" required accept=".pdf,.png,.jpg,.jpeg,.csv,.xlsx,.xls,.doc,.docx" /></div>
+        <div className="upload-fields">
+          <label><span>Employer of record</span><select name="employerId" required defaultValue=""><option value="" disabled>Choose employer</option>{data.employers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label><span>Document type</span><select name="kind" required defaultValue="invoice"><option value="invoice">Invoice</option><option value="timesheet">Timesheet or schedule</option><option value="payroll">Pay stub or payroll report</option><option value="business_expense">Business-expense evidence</option><option value="mou">MOU</option><option value="purchase_order">Purchase order / amendment</option><option value="grant_evidence">Grant evidence</option></select></label>
+          <label className="wide-field"><span>Link to packet <small>optional</small></span><select name="packetId" defaultValue=""><option value="">Leave unmatched for triage</option>{data.packets.map((packet) => <option key={packet.id} value={packet.id}>{packet.employerName} · {packet.label}</option>)}</select></label>
+          <label className="wide-field"><span>Document total <small>required for a linked invoice</small></span><input name="amount" inputMode="decimal" placeholder="0.00" aria-describedby="amount-help" /><small id="amount-help">A linked invoice reserves this amount against the employer&apos;s active purchase order immediately.</small></label>
         </div>
-      )}
+        <button className="primary-action upload-submit" disabled={busy}>{busy ? "Adding document…" : "Add to review queue"}</button>
+        {message && <p className={`form-message ${message.includes("queue") ? "success" : "error"}`} role="status">{message}</p>}
+      </form>
+      <aside className="intake-guide panel"><span className="section-kicker">What happens next</span><ol><li><b>1</b><span><strong>Classify</strong><small>Identify invoice, payroll, time, expense, MOU, or PO.</small></span></li><li><b>2</b><span><strong>Extract</strong><small>Read names, dates, amounts, signatures, hours, and expense detail.</small></span></li><li><b>3</b><span><strong>Reconcile</strong><small>Match the packet, reserve PO funding, and test the evidence.</small></span></li><li><b>4</b><span><strong>Review</strong><small>Human approval remains required before payment.</small></span></li></ol><div className="privacy-note"><span>⌑</span><p><strong>Seven-year record</strong> Original files, corrections, and decisions stay attached to the packet.</p></div></aside>
+    </div>
+  </>;
+}
 
-      {selected && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>
-          <section className="allocation-modal" role="dialog" aria-modal="true" aria-labelledby="allocation-title" onMouseDown={(event) => event.stopPropagation()}>
-            <button className="close-button" onClick={() => setSelected(null)} aria-label="Close allocation review">×</button>
-            <span className="eyebrow">Review allocation</span>
-            <h2 id="allocation-title">Ready for finance review</h2>
-            <p className="allocation-lede">This creates a planning record only. Finance can verify the award budget, approvals, and final account coding.</p>
-            <div className="allocation-summary">
-              <div><span>Funding source</span><strong>{selected.name}</strong><code>{selected.code}</code></div>
-              <div><span>Planned amount</span><strong>{money(amountValue)}</strong><small>{money(selected.available - amountValue)} projected balance</small></div>
-            </div>
-            <label className="memo-field"><span>Allocation memo</span><textarea defaultValue={`${scenarioInfo.title}: ${prompt}`} /></label>
-            <div className="review-checks"><span><i>✓</i> Purpose documented</span><span><i>✓</i> Source rationale attached</span><span><i>○</i> Finance approval pending</span></div>
-            <button className="confirm-button" onClick={confirmAllocation}>Add to planning log <span>→</span></button>
-          </section>
-        </div>
-      )}
+function RulesView({ data, onIntake }: { data: DashboardData; onIntake: () => void }) {
+  return <>
+    <header className="view-header"><div><span className="view-eyebrow">Eligibility rules</span><h1>The strictest rule controls.</h1><p>IRS is the baseline—not approval. Federal, ARC, grant, budget, and employer MOU terms can be more restrictive.</p></div></header>
+    <section className="rule-path">
+      {data.policies.map((policy, index) => <article key={policy.id} className="rule-card"><div className="rule-order">{index + 1}</div><div className="rule-level"><span>{policy.level}</span><StatusPill status={policy.status.replace(" ", "_")} /></div><h2>{policy.title}</h2><code>{policy.code}</code><p>{policy.summary}</p><footer><span>Effective {shortDate(policy.effectiveAt)}</span><button>View source ↗</button></footer></article>)}
+    </section>
+    <div className="rule-callout"><span>!</span><div><strong>Land and Earn award evidence still needed</strong><p>Load the signed grant agreement, approved budget, and amendments before relying on live business-expense determinations.</p></div><button onClick={onIntake}>Go to document intake</button></div>
+  </>;
+}
+
+function RemindersView({ data, onOpen }: { data: DashboardData; onOpen: (reminder: ReminderDraft) => void }) {
+  return <>
+    <header className="view-header"><div><span className="view-eyebrow">Reminder drafts</span><h1>Follow up without losing the thread.</h1><p>Drafts are prepared from unresolved evidence and deadlines. Nothing is sent automatically.</p></div></header>
+    <section className="reminders-board"><div className="board-column"><div className="board-title"><span>Needs review</span><b>{data.reminders.filter((item) => item.status === "draft").length}</b></div>{data.reminders.filter((item) => item.status === "draft").map((reminder) => <button key={reminder.id} className="board-card" onClick={() => onOpen(reminder)}><span className="mail-mark">✉</span><strong>{reminder.employerName}</strong><p>{reminder.subject}</p><small>To {reminder.contactEmail}</small><i>Open draft →</i></button>)}</div><div className="board-column"><div className="board-title"><span>Reviewed</span><b>{data.reminders.filter((item) => item.status === "reviewed").length}</b></div>{data.reminders.filter((item) => item.status === "reviewed").length ? data.reminders.filter((item) => item.status === "reviewed").map((reminder) => <button key={reminder.id} className="board-card reviewed" onClick={() => onOpen(reminder)}><span className="mail-mark">✓</span><strong>{reminder.employerName}</strong><p>{reminder.subject}</p><small>Reviewed {shortDate(reminder.reviewedAt)}</small></button>) : <EmptyMessage title="No reviewed drafts yet" body="Reviewed drafts remain here for the audit trail." />}</div></section>
+  </>;
+}
+
+function PacketDrawer({ packet, employer, onClose, act }: { packet: PacketSummary; employer: EmployerSummary; onClose: () => void; act: (action: string, id: string) => Promise<void> }) {
+  const [busy, setBusy] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const openBlockers = packet.exceptions.filter((item) => item.status === "open" && item.severity === 1);
+  const activeInvoice = packet.invoiceAmount > 0 && packet.status !== "invoice_not_received";
+  const balanceBefore = employer.available + (activeInvoice ? packet.invoiceAmount : 0);
+  const totalHours = packet.activities.reduce((sum, item) => sum + item.hours, 0);
+  const run = async (action: string, id: string) => {
+    setBusy(id); setFeedback("");
+    try { await act(action, id); if (action === "resolve_exception") setFeedback("Exception resolved. Packet checks refreshed."); else onClose(); }
+    catch (error) { setFeedback(error instanceof Error ? error.message : "Action failed."); }
+    setBusy("");
+  };
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <aside className="packet-drawer" role="dialog" aria-modal="true" aria-label={`Review ${packet.label}`}>
+      <div className="drawer-top"><button className="icon-button" onClick={onClose} aria-label="Close packet">×</button><div><span className="view-eyebrow">{packet.poNumber} · {packet.invoiceNumber ?? "Invoice missing"}</span><h2>{packet.label}</h2><p>{packet.placement ?? packet.employerName} · {shortDate(packet.periodStart)}–{shortDate(packet.periodEnd)}</p></div><StatusPill status={packet.status} /></div>
+      <div className="drawer-scroll">
+        <section className="packet-funding-impact"><div><span>Balance before</span><strong>{money(balanceBefore)}</strong></div><i>−</i><div><span>This invoice</span><strong>{packet.invoiceAmount ? money(packet.invoiceAmount) : "Waiting"}</strong></div><i>=</i><div className="after"><span>Current available</span><strong>{money(employer.available)}</strong></div></section>
+
+        {packet.exceptions.filter((item) => item.status === "open").length > 0 && <section className="drawer-section"><div className="drawer-section-title"><span className="section-kicker">Exceptions</span><h3>What must be resolved</h3></div><div className="exception-list">{packet.exceptions.filter((item) => item.status === "open").map((item) => <article key={item.id} className={`exception-card severity-${item.severity}`}><span className="exception-priority">P{item.severity}</span><div><strong>{item.title}</strong><p>{item.detail}</p><small>Owner · {item.ownerRole}</small></div><button disabled={busy === item.id} onClick={() => run("resolve_exception", item.id)}>{busy === item.id ? "Saving…" : "Mark resolved"}</button></article>)}</div></section>}
+
+        <section className="drawer-section"><div className="drawer-section-title"><span className="section-kicker">Reconciliation</span><h3>Invoice to evidence</h3></div><div className="reconciliation-grid"><div><span>Wages invoiced</span><strong>{money(packet.wageAmount)}</strong><small>{totalHours ? `${totalHours.toLocaleString()} hours × ${money(16, true)}` : "Hours not available"}</small></div><div><span>Business expenses</span><strong>{money(packet.businessAmount)}</strong><small>{packet.documents.filter((doc) => doc.kind === "business_expense").length} supporting record(s)</small></div><div className="recon-total"><span>Invoice total</span><strong>{money(packet.invoiceAmount)}</strong><small>{packet.wageAmount + packet.businessAmount === packet.invoiceAmount ? "Totals reconcile" : "Difference requires review"}</small></div></div></section>
+
+        {packet.activities.length > 0 && <section className="drawer-section"><div className="drawer-section-title"><span className="section-kicker">Time allocation</span><h3>What the intern worked on</h3></div><div className="activity-total"><strong>{totalHours.toLocaleString()}</strong><span>documented hours</span></div><div className="activity-bar">{packet.activities.map((item) => <i key={item.id} style={{ width: `${(item.hours / totalHours) * 100}%`, background: activityColors[item.category] ?? "var(--muted)" }} title={`${item.category}: ${item.hours} hours`} />)}</div><div className="activity-legend">{packet.activities.map((item) => <span key={item.id}><i style={{ background: activityColors[item.category] ?? "var(--muted)" }} /><b>{item.category}</b><small>{item.hours}h · {Math.round((item.hours / totalHours) * 100)}%</small></span>)}</div></section>}
+
+        <section className="drawer-section"><div className="drawer-section-title"><span className="section-kicker">Supporting documents</span><h3>Source evidence</h3></div><div className="document-list">{packet.documents.length ? packet.documents.map((doc) => <article key={doc.id}><span className="file-icon">{doc.fileName.split(".").pop()?.slice(0, 3).toUpperCase()}</span><div><strong>{doc.fileName}</strong><small>{titleCase(doc.kind)} · Added {shortDate(doc.uploadedAt)}</small></div><StatusPill status={doc.status} /><button aria-label={`Open ${doc.fileName}`}>···</button></article>) : <EmptyMessage title="No supporting documents" body="Add the invoice and required evidence to begin review." />}</div></section>
+
+        <section className="drawer-section evidence-rules"><div className="drawer-section-title"><span className="section-kicker">Eligibility evidence</span><h3>Rules applied</h3></div><ol><li><span>1</span><div><strong>IRS baseline</strong><small>Ordinary, necessary, business purpose, adequately documented</small></div><b>Pass</b></li><li><span>2</span><div><strong>Federal + ARC</strong><small>Allowable, allocable, approved scope, period of performance</small></div><b>Pass</b></li><li><span>3</span><div><strong>Employer MOU</strong><small>{employer.mouCode} · strictest applicable rule controls</small></div><b>Pass</b></li></ol></section>
+      </div>
+      <footer className="drawer-actions"><div>{feedback ? <span className={feedback.includes("refreshed") ? "good-feedback" : "bad-feedback"}>{feedback}</span> : <><span>{openBlockers.length ? `${openBlockers.length} payment blocker${openBlockers.length > 1 ? "s" : ""}` : "All payment blockers cleared"}</span><small>Human approval is recorded in the audit trail.</small></>}</div>{packet.status === "approved" ? <button className="primary-action" disabled={Boolean(busy)} onClick={() => run("mark_paid", packet.id)}>Mark paid</button> : packet.status !== "paid" && packet.invoiceAmount > 0 ? <button className="primary-action" disabled={openBlockers.length > 0 || Boolean(busy)} onClick={() => run("approve_packet", packet.id)}>{busy ? "Approving…" : "Approve reimbursement"}</button> : null}</footer>
+    </aside>
+  </div>;
+}
+
+function ReminderModal({ reminder, onClose, act }: { reminder: ReminderDraft; onClose: () => void; act: (action: string, id: string) => Promise<void> }) {
+  const [body, setBody] = useState(reminder.body);
+  const [copied, setCopied] = useState(false);
+  const review = async () => { await act("review_reminder", reminder.id); onClose(); };
+  const copy = async () => { await navigator.clipboard.writeText(`Subject: ${reminder.subject}\n\n${body}`); setCopied(true); };
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="reminder-modal" role="dialog" aria-modal="true"><button className="icon-button" onClick={onClose}>×</button><span className="view-eyebrow">Draft only · nothing sends automatically</span><h2>{reminder.employerName}</h2><label><span>To</span><input value={reminder.contactEmail} readOnly /></label><label><span>Subject</span><input value={reminder.subject} readOnly /></label><label><span>Message</span><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={10} /></label><footer><span>{reminder.status === "reviewed" ? "Reviewed draft" : "Review before copying to email"}</span><div><button className="secondary-action" onClick={copy}>{copied ? "Copied" : "Copy email"}</button>{reminder.status !== "reviewed" && <button className="primary-action" onClick={review}>Mark reviewed</button>}</div></footer></div></div>;
+}
+
+export default function LandAndEarnApp() {
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [error, setError] = useState("");
+  const [view, setView] = useState<View>("desk");
+  const [packet, setPacket] = useState<PacketSummary | null>(null);
+  const [employer, setEmployer] = useState<EmployerSummary | null>(null);
+  const [reminder, setReminder] = useState<ReminderDraft | null>(null);
+  const [mobileMenu, setMobileMenu] = useState(false);
+
+  const load = useCallback(async () => {
+    const response = await fetch("/api/dashboard", { cache: "no-store" });
+    const result = await response.json() as DashboardData & { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "The reimbursement desk could not open.");
+    setData(result); setError("");
+    return result;
+  }, []);
+
+  // The dashboard is hydrated from the durable D1-backed API after the client mounts.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { load().catch((reason) => setError(reason instanceof Error ? reason.message : "The reimbursement desk could not open.")); }, [load]);
+
+  const operation = useCallback(async (action: string, id: string) => {
+    const response = await fetch("/api/operations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, id }) });
+    const result = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(result.error ?? "The change could not be saved.");
+    const next = await load();
+    setPacket((current) => current ? (next.packets.find((item) => item.id === current.id) ?? null) : null);
+  }, [load]);
+
+  const selectedEmployer = useMemo(() => packet && data ? data.employers.find((item) => item.id === packet.employerId) ?? null : null, [packet, data]);
+  const chooseEmployer = (item: EmployerSummary) => { setEmployer(item); setView("employers"); };
+  const go = (next: View) => { setView(next); setMobileMenu(false); if (next !== "employers") setEmployer(null); };
+
+  if (!data && !error) return <LoadingDesk />;
+  if (error || !data) return <div className="fatal-state"><div className="brand-seal">LE</div><h1>The desk could not open.</h1><p>{error}</p><button className="primary-action" onClick={() => load().catch((reason) => setError(String(reason)))}>Try again</button></div>;
+
+  const openBlockers = data.packets.flatMap((item) => item.exceptions).filter((item) => item.status === "open" && item.severity === 1).length;
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><span className="brand-seal">LE</span><div><strong>Land & Earn</strong><small>Grant operations</small></div></div>
+      <nav aria-label="Primary navigation">{navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => go(item.id)}><span>{item.mark}</span>{item.label}{item.id === "packets" && openBlockers > 0 && <b>{openBlockers}</b>}</button>)}</nav>
+      <div className="sidebar-closeout"><span>FY26 closeout</span><strong>June 30</strong><div><i style={{ width: "88%" }} /></div><small>Invoices received by deadline</small></div>
+      <div className="sidebar-user"><span>IK</span><div><strong>Ishmel</strong><small>Program manager</small></div><button aria-label="Account menu">···</button></div>
+    </aside>
+    <main className="main-content">
+      <div className="mobile-topbar"><button aria-label="Open navigation" onClick={() => setMobileMenu(true)}>☰</button><strong>Land & Earn</strong><button aria-label="Add documents" onClick={() => go("intake")}>＋</button></div>
+      {view === "desk" && <DeskView data={data} onPacket={setPacket} onEmployer={chooseEmployer} onReminder={setReminder} go={go} />}
+      {view === "packets" && <PacketsView data={data} onPacket={setPacket} />}
+      {view === "employers" && <EmployerView data={data} selected={employer} onSelect={setEmployer} onPacket={setPacket} />}
+      {view === "intake" && <IntakeView data={data} onUploaded={load} />}
+      {view === "rules" && <RulesView data={data} onIntake={() => go("intake")} />}
+      {view === "reminders" && <RemindersView data={data} onOpen={setReminder} />}
     </main>
-  );
+    {mobileMenu && <div className="mobile-menu-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileMenu(false); }}><nav className="mobile-menu" aria-label="Mobile navigation"><div><span className="brand-seal">LE</span><strong>Land & Earn</strong><button className="icon-button" onClick={() => setMobileMenu(false)}>×</button></div>{navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => go(item.id)}><span>{item.mark}</span>{item.label}</button>)}</nav></div>}
+    {packet && selectedEmployer && <PacketDrawer packet={packet} employer={selectedEmployer} onClose={() => setPacket(null)} act={operation} />}
+    {reminder && <ReminderModal reminder={reminder} onClose={() => setReminder(null)} act={operation} />}
+  </div>;
 }

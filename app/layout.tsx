@@ -2,26 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "FundGuide · Funding Allocation Assistant",
-  description: "Source-grounded funding recommendations for nonprofit grant teams.",
-  openGraph: {
-    title: "FundGuide · Funding Allocation Assistant",
-    description: "Put every expense on the right funding path.",
-    type: "website",
-    images: [{ url: "/og.png", width: 1731, height: 909, alt: "FundGuide funding allocation assistant" }],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "FundGuide · Funding Allocation Assistant",
-    description: "Put every expense on the right funding path.",
-    images: ["/og.png"],
-  },
+  title: "Land & Earn · Grant Operations",
+  description: "Reimbursement operations for the Land and Earn internship program.",
+  openGraph: { title: "Land & Earn · Grant Operations", description: "Evidence-ready employer reimbursements, on time.", type: "website", images: [{ url: "/og-land-and-earn.png", width: 1674, height: 941, alt: "Land & Earn grant operations" }] },
+  twitter: { card: "summary_large_image", title: "Land & Earn · Grant Operations", description: "Evidence-ready employer reimbursements, on time.", images: ["/og-land-and-earn.png"] },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
-  );
+  return <html lang="en"><body>{children}</body></html>;
 }
