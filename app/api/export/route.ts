@@ -1,10 +1,12 @@
 import { buildPacketArchive } from "../../../lib/data";
+import { accessErrorResponse, requireIdentity } from "../../../lib/auth";
 
 export async function GET(request: Request) {
   try {
     const packetId = new URL(request.url).searchParams.get("packetId");
     if (!packetId) return Response.json({ error: "Packet id is required." }, { status: 400 });
-    const packet = await buildPacketArchive(packetId);
+    const identity = requireIdentity(request);
+    const packet = await buildPacketArchive(packetId, identity.actor);
     const body = new Uint8Array(packet.body.byteLength);
     body.set(packet.body);
     return new Response(body.buffer, {
@@ -16,6 +18,7 @@ export async function GET(request: Request) {
       },
     });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Export unavailable." }, { status: 404 });
+    const response = accessErrorResponse(error, "Export unavailable.");
+    return response.status >= 500 ? new Response(response.body, { status: 404, headers: response.headers }) : response;
   }
 }

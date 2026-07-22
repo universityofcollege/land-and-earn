@@ -9,6 +9,9 @@ interface Env {
   AI_EXTRACTION_ENABLED?: string;
   OPENAI_API_KEY?: string;
   OPENAI_MODEL?: string;
+  AUTH_MODE?: string;
+  PROGRAM_MANAGER_EMAILS?: string;
+  FISCAL_REVIEWER_EMAILS?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -44,7 +47,15 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    const response = await handler.fetch(request, env, ctx);
+    const headers = new Headers(response.headers);
+    headers.set("x-content-type-options", "nosniff");
+    headers.set("x-frame-options", "DENY");
+    headers.set("referrer-policy", "no-referrer");
+    headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+    if (url.protocol === "https:") headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+    if (url.pathname.startsWith("/api/")) headers.set("cache-control", "private, no-store");
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
 };
 

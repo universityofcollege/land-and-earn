@@ -64,6 +64,11 @@ test("classifies governing PO and MOU records", async () => {
   assert.equal(mou.documentType, "mou");
 });
 
+test("classifies Land and Earn award records as grant evidence", async () => {
+  const result = await extractDocument(await fixture("land-and-earn-grant-evidence.txt"), "unknown", {});
+  assert.equal(result.documentType, "grant_evidence");
+});
+
 test("hashing is stable and content-sensitive", async () => {
   const first = await fixture("redbird-payroll.csv");
   const second = await fixture("redbird-payroll.csv");

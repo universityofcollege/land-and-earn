@@ -10,7 +10,7 @@ Data: synthetic fixtures only; no real youth or payroll PII
 TypeScript: pass
 ESLint: pass
 Production build: pass
-Node tests: 10 passed, 0 failed
+Node tests: 12 passed, 0 failed
 ```
 
 ## Runtime scenarios
@@ -19,6 +19,7 @@ Node tests: 10 passed, 0 failed
 |---|---|
 | Upload invoice, timesheet, payroll, and expense receipt | Correctly classified; originals stored; evidence and confidence returned |
 | Upload and register PO and MOU source records | Employer shows the linked PO original and both effective-dated MOU versions show their signed source when available |
+| Link a versioned grant/budget source to an eligibility rule | Rule shows the source original, version, effective period, and verified status; the document leaves the unmatched queue and expense checks cite it |
 | Upload a corrected invoice | Prior claims are superseded, the replacement version becomes current, the support link is inherited, and the PO ledger records only the delta |
 | Upload exact duplicate timesheet | Existing document linked; no duplicate activity rows or PO event |
 | Link one payroll report to a second intern packet | Both packets show the same source; Red Bird PO committed amount remains $93,120 |
@@ -30,6 +31,9 @@ Node tests: 10 passed, 0 failed
 | Prepare reminders | Separate draft-only recipient records created; no send endpoint or automatic send path exists |
 | Export packet | HTTP 200 `application/zip`; archive contains `packet-summary.html`, `README.txt`, and four available original files |
 | Retrieve original | HTTP 200 private/no-store response and `original_viewed` audit event |
+| Anonymous request in required-auth mode | HTTP 401 |
+| Program-manager identity in allowlist | Dashboard HTTP 200 with manager role and named actor |
+| Fiscal-reviewer identity in allowlist | Dashboard HTTP 200; mutation attempt HTTP 403 |
 
 ## Reproduction commands
 
@@ -41,4 +45,4 @@ npm run build
 node --test tests/rendered-html.test.mjs tests/extraction.test.ts
 ```
 
-The local development URL is `http://localhost:3001/` while the current Codex task’s dev server is running.
+The local development URL is `http://localhost:3001/` while the current Codex task’s dev server is running. Localhost uses an explicit development-only manager identity unless `AUTH_MODE=required`; hosted environments always require the forwarded workspace identity and an email allowlist assignment.

@@ -36,5 +36,8 @@ declare module "cloudflare:workers" {
     AI_EXTRACTION_ENABLED?: string;
     OPENAI_API_KEY?: string;
     OPENAI_MODEL?: string;
+    AUTH_MODE?: string;
+    PROGRAM_MANAGER_EMAILS?: string;
+    FISCAL_REVIEWER_EMAILS?: string;
   };
 }

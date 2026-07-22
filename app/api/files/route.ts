@@ -1,10 +1,12 @@
 import { getDocumentOriginal } from "../../../lib/data";
+import { accessErrorResponse, requireIdentity } from "../../../lib/auth";
 
 export async function GET(request: Request) {
   try {
     const id = new URL(request.url).searchParams.get("id");
     if (!id) return Response.json({ error: "Document id is required." }, { status: 400 });
-    const file = await getDocumentOriginal(id);
+    const identity = requireIdentity(request);
+    const file = await getDocumentOriginal(id, identity.actor);
     return new Response(file.body, {
       headers: {
         "content-type": file.contentType,
@@ -14,6 +16,7 @@ export async function GET(request: Request) {
       },
     });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "File unavailable." }, { status: 404 });
+    const response = accessErrorResponse(error, "File unavailable.");
+    return response.status >= 500 ? new Response(response.body, { status: 404, headers: response.headers }) : response;
   }
 }

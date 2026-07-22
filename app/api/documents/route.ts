@@ -1,9 +1,12 @@
 import { storeDocuments } from "../../../lib/data";
+import { accessErrorResponse, requireIdentity } from "../../../lib/auth";
 
 export async function POST(request: Request) {
   try {
-    return Response.json(await storeDocuments(await request.formData()), { status: 201 });
+    const identity = requireIdentity(request, "manage");
+    return Response.json(await storeDocuments(await request.formData(), identity.actor), { status: 201 });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Upload failed." }, { status: 400 });
+    const response = accessErrorResponse(error, "Upload failed.");
+    return response.status >= 500 ? new Response(response.body, { status: 400, headers: response.headers }) : response;
   }
 }

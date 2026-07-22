@@ -230,6 +230,7 @@ function IntakeView({ data, onUploaded, operate }: { data: DashboardData; onUplo
   const [message, setMessage] = useState("");
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setBusy(true); setMessage("");
+    if (!data.session.canManage) { setMessage("Fiscal reviewer access is read-only. A program manager must upload documents."); setBusy(false); return; }
     const form = event.currentTarget;
     const response = await fetch("/api/documents", { method: "POST", body: new FormData(form) });
     const result = await response.json() as { error?: string; documents?: Array<{ fileName: string; duplicate?: boolean; confidence?: number; provider?: string }> };
@@ -258,7 +259,7 @@ function IntakeView({ data, onUploaded, operate }: { data: DashboardData; onUplo
           <label className="wide-field"><span>Link to packet <small>optional</small></span><select name="packetId" defaultValue=""><option value="">Leave unmatched for triage</option>{data.packets.map((packet) => <option key={packet.id} value={packet.id}>{packet.employerName} · {packet.label}</option>)}</select></label>
           <label className="wide-field"><span>Invoice total override <small>optional when the amount is readable</small></span><input name="amount" inputMode="decimal" placeholder="0.00" aria-describedby="amount-help" /><small id="amount-help">When provided, this is the amount reserved against the employer&apos;s active purchase order. Otherwise, the extracted invoice total is used.</small></label>
         </div>
-        <button className="primary-action upload-submit" disabled={busy}>{busy ? "Adding document…" : "Add to review queue"}</button>
+        <button className="primary-action upload-submit" disabled={busy || !data.session.canManage}>{busy ? "Adding document…" : data.session.canManage ? "Add to review queue" : "Read-only access"}</button>
         {message && <p className={`form-message ${message.includes("processed") ? "success" : "error"}`} role="status">{message}</p>}
       </form>
       <aside className="intake-guide panel"><span className="section-kicker">What happens next</span><ol><li><b>1</b><span><strong>Classify</strong><small>Identify invoice, payroll, time, expense, MOU, or PO.</small></span></li><li><b>2</b><span><strong>Extract</strong><small>Read names, dates, amounts, signatures, hours, and expense detail.</small></span></li><li><b>3</b><span><strong>Reconcile</strong><small>Match the packet, reserve PO funding, and test the evidence.</small></span></li><li><b>4</b><span><strong>Review</strong><small>Human approval remains required before payment.</small></span></li></ol><div className="privacy-note"><span>⌑</span><p><strong>Seven-year record</strong> Original files, corrections, and decisions stay attached to the packet.</p></div></aside>
@@ -267,13 +268,23 @@ function IntakeView({ data, onUploaded, operate }: { data: DashboardData; onUplo
   </>;
 }
 
-function RulesView({ data, onIntake }: { data: DashboardData; onIntake: () => void }) {
+function RulesView({ data, onIntake, operate }: { data: DashboardData; onIntake: () => void; operate: Operate }) {
+  const [message, setMessage] = useState("");
+  const linkSource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setMessage("");
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    try { await operate("update_policy_source", String(values.policyId ?? ""), values); setMessage("Governing source linked and recorded in the audit history."); event.currentTarget.reset(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "The governing source could not be linked."); }
+  };
+  const grantEvidenceNeeded = data.policies.some((policy) => policy.id === "pol-grant" && policy.status !== "verified");
   return <>
     <header className="view-header"><div><span className="view-eyebrow">Eligibility rules</span><h1>The strictest rule controls.</h1><p>IRS is the baseline—not approval. Federal, ARC, grant, budget, and employer MOU terms can be more restrictive.</p></div></header>
     <section className="rule-path">
-      {data.policies.map((policy, index) => <article key={policy.id} className="rule-card"><div className="rule-order">{index + 1}</div><div className="rule-level"><span>{policy.level}</span><StatusPill status={policy.status.replace(" ", "_")} /></div><h2>{policy.title}</h2><code>{policy.code}</code><p>{policy.summary}</p><footer><span>Effective {shortDate(policy.effectiveAt)}</span><button>View source ↗</button></footer></article>)}
+      {data.policies.map((policy, index) => <article key={policy.id} className="rule-card"><div className="rule-order">{index + 1}</div><div className="rule-level"><span>{policy.level}</span><StatusPill status={policy.status.replace(" ", "_")} /></div><h2>{policy.title}</h2><code>{policy.code} · v{policy.version}</code><p>{policy.summary}</p><footer><span>Effective {shortDate(policy.effectiveAt)}{policy.effectiveEnd ? `–${shortDate(policy.effectiveEnd)}` : ""}</span>{policy.sourceDocumentId ? <a href={`/api/files?id=${encodeURIComponent(policy.sourceDocumentId)}`} target="_blank" rel="noreferrer">{policy.sourceDocumentName ?? "View source"} ↗</a> : <span>Source not linked</span>}</footer></article>)}
     </section>
-    <div className="rule-callout"><span>!</span><div><strong>Land and Earn award evidence still needed</strong><p>Load the signed grant agreement, approved budget, and amendments before relying on live business-expense determinations.</p></div><button onClick={onIntake}>Go to document intake</button></div>
+    {grantEvidenceNeeded && <div className="rule-callout"><span>!</span><div><strong>Land and Earn award evidence still needed</strong><p>Load the signed grant agreement, approved budget, and amendments before relying on live business-expense determinations.</p></div><button onClick={onIntake}>Go to document intake</button></div>}
+    {data.session.canManage && <form className="panel policy-source-form" onSubmit={linkSource}><div><span className="section-kicker">Versioned governing evidence</span><h2>Link an authoritative source</h2><p>Connect an uploaded grant, budget, amendment, federal, or ARC record to the rule it supports.</p></div><label><span>Rule</span><select name="policyId" required defaultValue=""><option value="" disabled>Choose rule</option>{data.policies.map((policy) => <option key={policy.id} value={policy.id}>{policy.level} · {policy.title}</option>)}</select></label><label><span>Uploaded source</span><select name="documentId" required defaultValue=""><option value="" disabled>Choose grant evidence</option>{data.unmatchedDocuments.filter((document) => document.kind === "grant_evidence").map((document) => <option key={document.id} value={document.id}>{document.fileName}</option>)}</select></label><label><span>Version</span><input name="version" required placeholder="2026.1" /></label><label><span>Effective start</span><input name="effectiveAt" type="date" required /></label><label><span>Effective end <small>optional</small></span><input name="effectiveEnd" type="date" /></label><button className="primary-action">Link source</button></form>}
+    {message && <p className={`form-message policy-message ${message.includes("linked") ? "success" : "error"}`} role="status">{message}</p>}
   </>;
 }
 
@@ -350,7 +361,7 @@ function ClaimReview({ claim, documents, act }: { claim: ReimbursementClaim; doc
 function EligibilityCheckRow({ check, index, act }: { check: EligibilityCheck; index: number; act: Operate }) {
   const [open, setOpen] = useState(false); const [result, setResult] = useState(check.result === "fail" ? "fail" : "pass"); const [reason, setReason] = useState(check.reviewedAt ? check.reason : ""); const [message, setMessage] = useState("");
   const save = async () => { try { await act("decide_eligibility_check", check.id, { result, reason }); setMessage("Recorded"); setOpen(false); } catch (error) { setMessage(error instanceof Error ? error.message : "Review failed"); } };
-  return <li className="eligibility-check-row"><span>{index + 1}</span><div><strong>{check.authorityLevel}</strong><small>{check.reason}</small>{message && <em>{message}</em>}{open && <div className="check-review"><select value={result} onChange={(event) => setResult(event.target.value)}><option value="pass">Pass</option><option value="fail">Fail</option></select><input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Specific evidence or controlling rule" /><button disabled={!reason} onClick={save}>Save</button></div>}</div><button className={`check-result check-${check.result}`} onClick={() => setOpen((value) => !value)}>{check.reviewedAt ? titleCase(check.result) : "Review"}</button></li>;
+  return <li className="eligibility-check-row"><span>{index + 1}</span><div><strong>{check.authorityLevel}</strong><small>{check.reason}</small>{check.sourceDocumentId ? <a className="check-source" href={`/api/files?id=${encodeURIComponent(check.sourceDocumentId)}`} target="_blank" rel="noreferrer">{check.policyCode}{check.policyVersion ? ` v${check.policyVersion}` : ""} · {check.sourceDocumentName} ↗</a> : <em className="check-source-missing">Specific governing source not linked</em>}{message && <em>{message}</em>}{open && <div className="check-review"><select value={result} onChange={(event) => setResult(event.target.value)}><option value="pass">Pass</option><option value="fail">Fail</option></select><input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Specific evidence or controlling rule" /><button disabled={!reason} onClick={save}>Save</button></div>}</div><button className={`check-result check-${check.result}`} onClick={() => setOpen((value) => !value)}>{check.reviewedAt ? titleCase(check.result) : "Review"}</button></li>;
 }
 
 function PacketDrawer({ packet, employer, employerPackets, hourlyRate, onClose, act }: { packet: PacketSummary; employer: EmployerSummary; employerPackets: PacketSummary[]; hourlyRate: number; onClose: () => void; act: Operate }) {
@@ -423,6 +434,7 @@ export default function LandAndEarnApp() {
   useEffect(() => { load().catch((reason) => setError(reason instanceof Error ? reason.message : "The reimbursement desk could not open.")); }, [load]);
 
   const operation = useCallback(async (action: string, id?: string, values: Record<string, unknown> = {}) => {
+    if (data && !data.session.canManage) throw new Error("Fiscal reviewer access is read-only. A program manager must perform this action.");
     const response = await fetch("/api/operations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, id, ...values }) });
     const result = await response.json() as Record<string, unknown> & { error?: string };
     if (!response.ok) throw new Error(result.error ?? "The change could not be saved.");
@@ -431,7 +443,7 @@ export default function LandAndEarnApp() {
     setEmployer((current) => current ? (next.employers.find((item) => item.id === current.id) ?? null) : null);
     setReminder((current) => current ? (next.reminders.find((item) => item.id === current.id) ?? null) : null);
     return result;
-  }, [load]);
+  }, [data, load]);
 
   const selectedEmployer = useMemo(() => packet && data ? data.employers.find((item) => item.id === packet.employerId) ?? null : null, [packet, data]);
   const chooseEmployer = (item: EmployerSummary) => { setEmployer(item); setView("employers"); };
@@ -442,20 +454,22 @@ export default function LandAndEarnApp() {
 
   const openBlockers = data.packets.flatMap((item) => item.exceptions).filter((item) => item.status === "open" && item.severity === 1).length;
   const receivedPercent = data.packets.length ? Math.round((data.packets.filter((item) => Boolean(item.receivedAt)).length / data.packets.length) * 100) : 0;
-  return <div className="app-shell">
+  const initials = data.session.name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "LE";
+  return <div className={`app-shell ${data.session.canManage ? "" : "read-only-session"}`}>
     <aside className="sidebar">
       <div className="brand"><span className="brand-seal">LE</span><div><strong>Land & Earn</strong><small>Grant operations</small></div></div>
       <nav aria-label="Primary navigation">{navItems.map((item) => <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => go(item.id)}><span>{item.mark}</span>{item.label}{item.id === "packets" && openBlockers > 0 && <b>{openBlockers}</b>}</button>)}</nav>
       <div className="sidebar-closeout"><span>FY{data.settings.fiscalYearEnd.slice(2, 4)} closeout</span><strong>{shortDate(data.settings.invoiceDeadline)}</strong><div><i style={{ width: `${receivedPercent}%` }} /></div><small>{receivedPercent}% of packet invoices received</small></div>
-      <div className="sidebar-user"><span>IK</span><div><strong>Ishmel</strong><small>Program manager</small></div><button aria-label="Account menu">···</button></div>
+      <div className="sidebar-user"><span>{initials}</span><div><strong>{data.session.name}</strong><small>{data.session.role === "program_manager" ? "Program manager" : "Fiscal reviewer · read only"}</small></div></div>
     </aside>
     <main className="main-content">
       <div className="mobile-topbar"><button aria-label="Open navigation" onClick={() => setMobileMenu(true)}>☰</button><strong>Land & Earn</strong><button aria-label="Add documents" onClick={() => go("intake")}>＋</button></div>
+      {!data.session.canManage && <div className="access-banner" role="status"><strong>Fiscal review mode</strong><span>You can inspect records, open originals, search, and export packets. Changes require a program manager.</span></div>}
       {view === "desk" && <DeskView data={data} onPacket={setPacket} onEmployer={chooseEmployer} onReminder={setReminder} go={go} />}
       {view === "packets" && <PacketsView data={data} onPacket={setPacket} operate={operation} />}
       {view === "employers" && <EmployerView data={data} selected={employer} onSelect={setEmployer} onPacket={setPacket} operate={operation} />}
       {view === "intake" && <IntakeView data={data} onUploaded={load} operate={operation} />}
-      {view === "rules" && <RulesView data={data} onIntake={() => go("intake")} />}
+      {view === "rules" && <RulesView data={data} onIntake={() => go("intake")} operate={operation} />}
       {view === "reminders" && <RemindersView data={data} onOpen={setReminder} operate={operation} />}
       {view === "setup" && <SetupView data={data} operate={operation} />}
     </main>

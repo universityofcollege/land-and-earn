@@ -49,3 +49,23 @@ test("declares human approval, draft-only communication, and complete audit expo
   assert.doesNotMatch(operations, /send_(?:email|reminder)|auto_send/i);
   assert.doesNotMatch(operations, /gmail|outlook|smtp|sendgrid/i);
 });
+
+test("enforces role access and source-linked governing decisions", async () => {
+  const [auth, dashboardRoute, operationsRoute, filesRoute, exportRoute, data, worker] = await Promise.all([
+    readFile(new URL("../lib/auth.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/dashboard/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/operations/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/files/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/export/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/data.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(auth, /oai-authenticated-user-email/);
+  assert.match(auth, /Fiscal reviewers have read-only access/);
+  for (const route of [dashboardRoute, operationsRoute, filesRoute, exportRoute]) assert.match(route, /requireIdentity/);
+  assert.match(operationsRoute, /requireIdentity\(request, "manage"\)/);
+  assert.match(data, /Link the specific governing source document before this check can pass/);
+  assert.match(data, /governing_source_linked/);
+  assert.match(worker, /private, no-store/);
+  assert.match(worker, /x-frame-options/);
+});

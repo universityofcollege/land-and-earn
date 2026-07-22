@@ -1,9 +1,11 @@
 import { getDashboardData } from "../../../lib/data";
+import { accessErrorResponse, requireIdentity } from "../../../lib/auth";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    return Response.json(await getDashboardData());
+    const identity = requireIdentity(request);
+    return Response.json({ ...(await getDashboardData()), session: { email: identity.email, name: identity.name, role: identity.role, canManage: identity.canManage } });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Dashboard unavailable." }, { status: 500 });
+    return accessErrorResponse(error, "Dashboard unavailable.");
   }
 }

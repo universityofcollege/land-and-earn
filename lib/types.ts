@@ -102,7 +102,7 @@ export type ReimbursementClaim = {
   confidence: number;
   checks: EligibilityCheck[];
 };
-export type EligibilityCheck = { id: string; authorityLevel: string; result: string; reason: string; confidence: number; reviewedAt: string | null };
+export type EligibilityCheck = { id: string; authorityLevel: string; result: string; reason: string; confidence: number; reviewedAt: string | null; policyId: string | null; policyCode: string | null; policyVersion: string | null; sourceDocumentId: string | null; sourceDocumentName: string | null };
 export type AuditEvent = { id: string; entityType: string; entityId: string; action: string; actor: string; occurredAt: string; before: unknown; after: unknown; reason: string | null };
 export type MouSummary = { id: string; employerId: string; code: string; version: string; effectiveStart: string; effectiveEnd: string; status: string; allowedExpenses: string[]; limits: Record<string, number>; conditions: string[]; evidenceRequirements: string[]; documentId: string | null; documentName: string | null };
 export type ProgramSettings = { id: string; name: string; hourlyRate: number; fiscalYearStart: string; fiscalYearEnd: string; invoiceDeadline: string; paymentDeadline: string; retentionYears: number; poWarningPercent: number };
@@ -139,8 +139,13 @@ export type PolicyRecord = {
   status: string;
   summary: string;
   effectiveAt: string;
+  effectiveEnd: string | null;
+  version: string;
+  sourceDocumentId: string | null;
+  sourceDocumentName: string | null;
 };
 export type DashboardData = {
+  session: { email: string; name: string; role: "program_manager" | "fiscal_reviewer"; canManage: boolean };
   generatedAt: string;
   hourlyRate: number;
   fiscalYearEnd: string;

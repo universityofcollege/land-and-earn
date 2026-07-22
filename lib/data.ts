@@ -140,6 +140,7 @@ export async function ensureDatabase() {
   await ensureDocumentColumns(db);
   await ensureColumns(db, "interns", [["supervisor_name", "TEXT"], ["supervisor_email", "TEXT"]]);
   await ensureColumns(db, "reminder_drafts", [["recipient_name", "TEXT"], ["recipient_email", "TEXT"], ["recipient_role", "TEXT NOT NULL DEFAULT 'Employer of record'"]]);
+  await ensureColumns(db, "policies", [["effective_end", "TEXT"], ["version", "TEXT NOT NULL DEFAULT '1'"], ["source_document_id", "TEXT"]]);
   await ensureColumns(db, "packet_exceptions", [["resolution_type", "TEXT"], ["resolution_reason", "TEXT"], ["resolved_by", "TEXT"]]);
   await ensureColumns(db, "reimbursement_claims", [["supporting_document_id", "TEXT REFERENCES documents(id)"]]);
   await ensureColumns(db, "activity_hours", [["document_id", "TEXT REFERENCES documents(id)"]]);
@@ -297,7 +298,7 @@ async function seedDatabase(db: Db) {
   await db.batch(statements);
 }
 
-export async function getDashboardData(): Promise<DashboardData> {
+export async function getDashboardData(): Promise<Omit<DashboardData, "session">> {
   const db = await ensureDatabase();
   const employerRows = await rows<Record<string, unknown>>(db, `
     SELECT e.*, po.id AS purchase_order_id, po.po_number, po.original_amount_cents,
@@ -384,7 +385,15 @@ export async function getDashboardData(): Promise<DashboardData> {
     status: String(claim.status), supportingDocumentId: claim.supporting_document_id ? String(claim.supporting_document_id) : null,
     supportingDocumentName: claim.supporting_document_id ? String(documentRows.find((document) => document.id === claim.supporting_document_id)?.file_name ?? "Supporting document") : null,
     source: String(claim.source_locator), confidence: Number(claim.confidence),
-    checks: checkRows.filter((check) => check.claim_id === claim.id).map((check) => ({ id: String(check.id), authorityLevel: String(check.authority_level), result: String(check.result), reason: String(check.reason), confidence: Number(check.confidence), reviewedAt: check.reviewed_at ? String(check.reviewed_at) : null })),
+    checks: checkRows.filter((check) => check.claim_id === claim.id).map((check) => {
+      const policy = policyRows.find((item) => item.id === check.policy_id);
+      const mou = String(check.authority_level) === "Employer MOU" ? mouRows.find((item) => item.id === claim.mou_id) : null;
+      const governingDocumentId = mou?.document_id ?? policy?.source_document_id ?? null;
+      return { id: String(check.id), authorityLevel: String(check.authority_level), result: String(check.result), reason: String(check.reason), confidence: Number(check.confidence), reviewedAt: check.reviewed_at ? String(check.reviewed_at) : null,
+        policyId: check.policy_id ? String(check.policy_id) : null, policyCode: mou?.code ? String(mou.code) : policy?.code ? String(policy.code) : null, policyVersion: mou?.version ? String(mou.version) : policy?.version ? String(policy.version) : null,
+        sourceDocumentId: governingDocumentId ? String(governingDocumentId) : null,
+        sourceDocumentName: governingDocumentId ? String(documentRows.find((document) => document.id === governingDocumentId)?.file_name ?? "Governing source") : null };
+    }),
   }));
   const historyFor = (packetId: string) => auditRows.filter((event) => event.entity_id === packetId || (event.entity_type === "document" && documentsFor(packetId).some((document) => document.id === event.entity_id))).map((event) => ({
     id: String(event.id), entityType: String(event.entity_type), entityId: String(event.entity_id), action: String(event.action), actor: String(event.actor), occurredAt: String(event.occurred_at),
@@ -427,15 +436,17 @@ export async function getDashboardData(): Promise<DashboardData> {
     })),
     policies: policyRows.map((row) => ({
       id: String(row.id), level: String(row.level), title: String(row.title), code: String(row.code),
-      status: String(row.status), summary: String(row.summary), effectiveAt: String(row.effective_at),
+      status: String(row.status), summary: String(row.summary), effectiveAt: String(row.effective_at), effectiveEnd: row.effective_end ? String(row.effective_end) : null,
+      version: String(row.version ?? "1"), sourceDocumentId: row.source_document_id ? String(row.source_document_id) : null,
+      sourceDocumentName: row.source_document_id ? String(documentRows.find((document) => document.id === row.source_document_id)?.file_name ?? "Governing source") : null,
     })),
     settings: { id: String(settingsRow.id), name: String(settingsRow.name), hourlyRate: cents(settingsRow.hourly_rate_cents), fiscalYearStart: String(settingsRow.fiscal_year_start), fiscalYearEnd: String(settingsRow.fiscal_year_end), invoiceDeadline: String(settingsRow.invoice_deadline), paymentDeadline: String(settingsRow.payment_deadline), retentionYears: Number(settingsRow.retention_years), poWarningPercent: Number(settingsRow.po_warning_percent) },
     mous: mouRows.map((row) => ({ id: String(row.id), employerId: String(row.employer_id), code: String(row.code), version: String(row.version), effectiveStart: String(row.effective_start), effectiveEnd: String(row.effective_end), status: String(row.status), allowedExpenses: JSON.parse(String(row.allowed_expenses_json || "[]")) as string[], limits: JSON.parse(String(row.limits_json || "{}")) as Record<string, number>, conditions: JSON.parse(String(row.conditions_json || "[]")) as string[], evidenceRequirements: JSON.parse(String(row.evidence_requirements_json || "[]")) as string[], documentId: row.document_id ? String(row.document_id) : null, documentName: row.document_id ? String(documentRows.find((document) => document.id === row.document_id)?.file_name ?? "MOU source") : null })),
-    unmatchedDocuments: documentRows.filter((row) => !row.packet_id && !documentLinkRows.some((link) => link.document_id === row.id) && !mouRows.some((mou) => mou.document_id === row.id) && !employerRows.some((employer) => employer.document_id === row.id)).map((row) => ({ id: String(row.id), employerId: String(row.employer_id), employerName: String(employerRows.find((employer) => employer.id === row.employer_id)?.name ?? "Unknown employer"), kind: String(row.kind), fileName: String(row.file_name), status: String(row.status), uploadedAt: String(row.uploaded_at), confidence: Number(row.classification_confidence ?? 0), provider: String(row.extraction_provider ?? "local"), hasOriginal: Boolean(row.r2_key) })),
+    unmatchedDocuments: documentRows.filter((row) => !row.packet_id && !documentLinkRows.some((link) => link.document_id === row.id) && !mouRows.some((mou) => mou.document_id === row.id) && !employerRows.some((employer) => employer.document_id === row.id) && !policyRows.some((policy) => policy.source_document_id === row.id)).map((row) => ({ id: String(row.id), employerId: String(row.employer_id), employerName: String(employerRows.find((employer) => employer.id === row.employer_id)?.name ?? "Unknown employer"), kind: String(row.kind), fileName: String(row.file_name), status: String(row.status), uploadedAt: String(row.uploaded_at), confidence: Number(row.classification_confidence ?? 0), provider: String(row.extraction_provider ?? "local"), hasOriginal: Boolean(row.r2_key) })),
   };
 }
 
-export async function resolveException(exceptionId: string, reason: string) {
+export async function resolveException(exceptionId: string, reason: string, actor = "Program manager") {
   const db = await ensureDatabase();
   if (!reason.trim()) throw new Error("Document the authorized override reason before resolving a payment exception.");
   const now = new Date().toISOString();
@@ -444,14 +455,14 @@ export async function resolveException(exceptionId: string, reason: string) {
   if (before.status !== "open") throw new Error("This review item is already resolved.");
   if (Number(before.severity) === 1) throw new Error("Priority 1 payment blockers require corrected evidence or a governing review decision; they cannot be manually overridden under the current pilot policy.");
   await db.batch([
-    db.prepare("UPDATE packet_exceptions SET status = 'resolved', resolved_at = ?, resolution_type = 'authorized_override', resolution_reason = ?, resolved_by = 'Program manager' WHERE id = ?").bind(now, reason.trim(), exceptionId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'exception_overridden', 'Program manager', ?, ?, ?, ?)")
-      .bind(`audit-${crypto.randomUUID()}`, before.packet_id, now, JSON.stringify(before), JSON.stringify({ ...before, status: "resolved", resolved_at: now, resolution_type: "authorized_override", resolution_reason: reason.trim(), resolved_by: "Program manager" }), reason.trim()),
+    db.prepare("UPDATE packet_exceptions SET status = 'resolved', resolved_at = ?, resolution_type = 'authorized_override', resolution_reason = ?, resolved_by = ? WHERE id = ?").bind(now, reason.trim(), actor, exceptionId),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'exception_overridden', ?, ?, ?, ?, ?)")
+      .bind(`audit-${crypto.randomUUID()}`, before.packet_id, actor, now, JSON.stringify(before), JSON.stringify({ ...before, status: "resolved", resolved_at: now, resolution_type: "authorized_override", resolution_reason: reason.trim(), resolved_by: actor }), reason.trim()),
   ]);
   return { ok: true };
 }
 
-export async function approvePacket(packetId: string) {
+export async function approvePacket(packetId: string, actor = "Program manager") {
   const db = await ensureDatabase();
   await reconcilePacket(db, packetId);
   const blocker = await db.prepare("SELECT COUNT(*) AS count FROM packet_exceptions WHERE packet_id = ? AND severity = 1 AND status = 'open'").bind(packetId).first<{ count: number }>();
@@ -488,65 +499,65 @@ export async function approvePacket(packetId: string) {
   const duplicate = await db.prepare("SELECT id FROM po_events WHERE packet_id = ? AND event_type = 'invoice_approved'").bind(packetId).first();
   const now = new Date().toISOString();
   const operations = [db.prepare("UPDATE packets SET status = 'approved', approved_at = ? WHERE id = ?").bind(now, packetId)];
-  if (!duplicate) operations.push(db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_approved', ?, ?, ?, 'Program manager')").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, packet.invoice_amount_cents, packet.invoice_number ?? packetId, now.slice(0, 10)));
-  operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reimbursement_approved', 'Program manager', ?, ?, ?, NULL)")
-    .bind(`audit-${crypto.randomUUID()}`, packetId, now, JSON.stringify(packet), JSON.stringify({ ...packet, status: "approved", approved_at: now })));
+  if (!duplicate) operations.push(db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_approved', ?, ?, ?, ?)").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, packet.invoice_amount_cents, packet.invoice_number ?? packetId, now.slice(0, 10), actor));
+  operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reimbursement_approved', ?, ?, ?, ?, NULL)")
+    .bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify(packet), JSON.stringify({ ...packet, status: "approved", approved_at: now })));
   await db.batch(operations);
   return { ok: true };
 }
 
-export async function markPacketPaid(packetId: string) {
+export async function markPacketPaid(packetId: string, actor = "Program manager") {
   const db = await ensureDatabase();
   const packet = await db.prepare("SELECT * FROM packets WHERE id = ? AND status = 'approved'").bind(packetId).first<Record<string, unknown>>();
   if (!packet) throw new Error("Only an approved packet can be marked paid.");
   const duplicate = await db.prepare("SELECT id FROM po_events WHERE packet_id = ? AND event_type = 'invoice_paid'").bind(packetId).first();
   const now = new Date().toISOString();
   const operations = [db.prepare("UPDATE packets SET status = 'paid', paid_at = ? WHERE id = ?").bind(now, packetId)];
-  if (!duplicate) operations.push(db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_paid', ?, ?, ?, 'Fiscal reviewer')").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, packet.invoice_amount_cents, packet.invoice_number ?? packetId, now.slice(0, 10)));
-  operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'payment_recorded', 'Fiscal reviewer', ?, ?, ?, NULL)")
-    .bind(`audit-${crypto.randomUUID()}`, packetId, now, JSON.stringify(packet), JSON.stringify({ ...packet, status: "paid", paid_at: now })));
+  if (!duplicate) operations.push(db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_paid', ?, ?, ?, ?)").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, packet.invoice_amount_cents, packet.invoice_number ?? packetId, now.slice(0, 10), actor));
+  operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'payment_recorded', ?, ?, ?, ?, NULL)")
+    .bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify(packet), JSON.stringify({ ...packet, status: "paid", paid_at: now })));
   await db.batch(operations);
   return { ok: true };
 }
 
-export async function reviewReminder(reminderId: string, body?: string) {
+export async function reviewReminder(reminderId: string, body?: string, actor = "Program manager") {
   const db = await ensureDatabase();
   const before = await db.prepare("SELECT * FROM reminder_drafts WHERE id = ?").bind(reminderId).first<Record<string, unknown>>();
   if (!before) throw new Error("Reminder draft not found.");
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE reminder_drafts SET body = COALESCE(?, body), status = 'reviewed', reviewed_at = ? WHERE id = ?").bind(body?.trim() || null, now, reminderId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_reviewed', 'Program manager', ?, ?, ?, NULL)")
-      .bind(`audit-${crypto.randomUUID()}`, before.packet_id ?? before.employer_id, now, JSON.stringify(before), JSON.stringify({ ...before, status: "reviewed", reviewed_at: now })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_reviewed', ?, ?, ?, ?, NULL)")
+      .bind(`audit-${crypto.randomUUID()}`, before.packet_id ?? before.employer_id, actor, now, JSON.stringify(before), JSON.stringify({ ...before, status: "reviewed", reviewed_at: now })),
   ]);
   return { ok: true };
 }
 
-export async function recordReminderCopy(reminderId: string, body?: string) {
+export async function recordReminderCopy(reminderId: string, body?: string, actor = "Program manager") {
   const db = await ensureDatabase();
   const reminder = await db.prepare("SELECT * FROM reminder_drafts WHERE id = ?").bind(reminderId).first<Record<string, unknown>>();
   if (!reminder) throw new Error("Reminder draft not found.");
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE reminder_drafts SET body = COALESCE(?, body) WHERE id = ?").bind(body?.trim() || null, reminderId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_copied', 'Program manager', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, reminder.packet_id ?? reminder.employer_id, now, JSON.stringify({ reminderId, subject: reminder.subject })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_copied', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, reminder.packet_id ?? reminder.employer_id, actor, now, JSON.stringify({ reminderId, subject: reminder.subject })),
   ]);
   return { ok: true };
 }
 
-export async function discardReminder(reminderId: string) {
+export async function discardReminder(reminderId: string, actor = "Program manager") {
   const db = await ensureDatabase();
   const reminder = await db.prepare("SELECT * FROM reminder_drafts WHERE id = ?").bind(reminderId).first<Record<string, unknown>>();
   if (!reminder) throw new Error("Reminder draft not found.");
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE reminder_drafts SET status = 'discarded', reviewed_at = ? WHERE id = ?").bind(now, reminderId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_discarded', 'Program manager', ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, reminder.packet_id ?? reminder.employer_id, now, JSON.stringify(reminder), JSON.stringify({ ...reminder, status: "discarded" })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_discarded', ?, ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, reminder.packet_id ?? reminder.employer_id, actor, now, JSON.stringify(reminder), JSON.stringify({ ...reminder, status: "discarded" })),
   ]);
   return { ok: true };
 }
 
-export async function generateReminderDrafts() {
+export async function generateReminderDrafts(actor = "Program manager") {
   const db = await ensureDatabase();
   const settings = await db.prepare("SELECT invoice_deadline, payment_deadline FROM program_settings WHERE id = 'program-land-earn'").first<{ invoice_deadline: string; payment_deadline: string }>();
   const packets = await rows<Record<string, unknown>>(db, `SELECT p.*, e.name AS employer_name, e.contact_name, e.contact_email,
@@ -577,7 +588,7 @@ export async function generateReminderDrafts() {
       if (existing) {
         await db.batch([
           db.prepare("UPDATE reminder_drafts SET subject = ?, body = ?, recipient_name = ?, recipient_email = ? WHERE id = ?").bind(subject, body, group.name, group.email, existing.id),
-          db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_draft_refreshed', 'System', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packet.id, now, JSON.stringify({ reminderId: existing.id, subject, recipientRole: group.role })),
+          db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_draft_refreshed', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packet.id, actor, now, JSON.stringify({ reminderId: existing.id, subject, recipientRole: group.role })),
         ]);
         refreshed += 1;
         continue;
@@ -589,7 +600,7 @@ export async function generateReminderDrafts() {
           VALUES (?, ?, ?, ?, ?, 'draft', ?, NULL, ?, ?, ?)`)
           .bind(id, packet.employer_id, packet.id, subject, body, now, group.name, group.email, group.role),
         db.prepare("UPDATE packets SET status = 'reminder_draft_ready' WHERE id = ? AND status NOT IN ('approved','paid')").bind(packet.id),
-        db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_draft_created', 'System', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packet.id, now, JSON.stringify({ reminderId: id, subject, recipientRole: group.role })),
+        db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'reminder_draft_created', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packet.id, actor, now, JSON.stringify({ reminderId: id, subject, recipientRole: group.role })),
       ]);
       created += 1;
     }
@@ -597,7 +608,7 @@ export async function generateReminderDrafts() {
   return { ok: true, created, refreshed };
 }
 
-export async function adjustPurchaseOrder(input: { id: string; amount?: number; reason?: string }) {
+export async function adjustPurchaseOrder(input: { id: string; amount?: number; reason?: string; actor?: string }) {
   const db = await ensureDatabase();
   const amountCents = Math.round(Number(input.amount ?? 0) * 100);
   if (!amountCents || !input.reason?.trim()) throw new Error("Enter a non-zero amendment amount and reason.");
@@ -609,14 +620,14 @@ export async function adjustPurchaseOrder(input: { id: string; amount?: number; 
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE purchase_orders SET amendment_amount_cents = amendment_amount_cents + ? WHERE id = ?").bind(amountCents, input.id),
-    db.prepare("INSERT INTO po_events VALUES (?, ?, NULL, 'po_amendment', ?, ?, ?, 'Program manager')").bind(`evt-${crypto.randomUUID()}`, input.id, amountCents, input.reason.trim(), now.slice(0, 10)),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'purchase_order', ?, 'funding_amended', 'Program manager', ?, ?, ?, ?)")
-      .bind(`audit-${crypto.randomUUID()}`, input.id, now, JSON.stringify(po), JSON.stringify({ amendmentDeltaCents: amountCents, revisedFundingCents: revisedFunding }), input.reason.trim()),
+    db.prepare("INSERT INTO po_events VALUES (?, ?, NULL, 'po_amendment', ?, ?, ?, ?)").bind(`evt-${crypto.randomUUID()}`, input.id, amountCents, input.reason.trim(), now.slice(0, 10), String(input.actor ?? "Program manager")),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'purchase_order', ?, 'funding_amended', ?, ?, ?, ?, ?)")
+      .bind(`audit-${crypto.randomUUID()}`, input.id, String(input.actor ?? "Program manager"), now, JSON.stringify(po), JSON.stringify({ amendmentDeltaCents: amountCents, revisedFundingCents: revisedFunding }), input.reason.trim()),
   ]);
   return { ok: true };
 }
 
-export async function voidInvoice(packetId: string, reason: string) {
+export async function voidInvoice(packetId: string, reason: string, actor = "Program manager") {
   const db = await ensureDatabase();
   if (!reason.trim()) throw new Error("A reason is required to release invoice funding.");
   const packet = await db.prepare("SELECT * FROM packets WHERE id = ?").bind(packetId).first<Record<string, unknown>>();
@@ -626,15 +637,15 @@ export async function voidInvoice(packetId: string, reason: string) {
   if (!net?.total) throw new Error("This invoice has no active funding commitment.");
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_voided', ?, ?, ?, 'Program manager')").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, -Number(net.total), `${packet.invoice_number ?? packetId} · ${reason.trim()}`, now.slice(0, 10)),
+    db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_voided', ?, ?, ?, ?)").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, -Number(net.total), `${packet.invoice_number ?? packetId} · ${reason.trim()}`, now.slice(0, 10), actor),
     db.prepare("UPDATE packets SET status = 'follow_up_required' WHERE id = ?").bind(packetId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'invoice_commitment_released', 'Program manager', ?, ?, ?, ?)")
-      .bind(`audit-${crypto.randomUUID()}`, packetId, now, JSON.stringify(packet), JSON.stringify({ releasedCents: Number(net.total), status: "follow_up_required" }), reason.trim()),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'invoice_commitment_released', ?, ?, ?, ?, ?)")
+      .bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify(packet), JSON.stringify({ releasedCents: Number(net.total), status: "follow_up_required" }), reason.trim()),
   ]);
   return { ok: true };
 }
 
-export async function correctExtractedField(input: { id: string; value?: string; reason?: string }) {
+export async function correctExtractedField(input: { id: string; value?: string; reason?: string; actor?: string }) {
   const db = await ensureDatabase();
   if (input.value == null || !input.reason?.trim()) throw new Error("A corrected value and reason are required.");
   const field = await db.prepare("SELECT * FROM document_field_evidence WHERE id = ?").bind(input.id).first<Record<string, unknown>>();
@@ -646,16 +657,16 @@ export async function correctExtractedField(input: { id: string; value?: string;
   if (target) { target.value = input.value; target.confidence = 100; target.source = `${target.source} · corrected by reviewer`; }
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare("UPDATE document_field_evidence SET corrected_value_json = ?, status = 'corrected', reviewed_at = ?, reviewer = 'Program manager' WHERE id = ?").bind(JSON.stringify(input.value), now, input.id),
+    db.prepare("UPDATE document_field_evidence SET corrected_value_json = ?, status = 'corrected', reviewed_at = ?, reviewer = ? WHERE id = ?").bind(JSON.stringify(input.value), now, String(input.actor ?? "Program manager"), input.id),
     db.prepare("UPDATE documents SET extracted_json = ?, status = 'reviewed' WHERE id = ?").bind(JSON.stringify(extraction), field.document_id),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'extracted_field_corrected', 'Program manager', ?, ?, ?, ?)")
-      .bind(`audit-${crypto.randomUUID()}`, field.document_id, now, JSON.stringify({ field: field.field_name, value: JSON.parse(String(field.value_json)) }), JSON.stringify({ field: field.field_name, value: input.value }), input.reason.trim()),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'extracted_field_corrected', ?, ?, ?, ?, ?)")
+      .bind(`audit-${crypto.randomUUID()}`, field.document_id, String(input.actor ?? "Program manager"), now, JSON.stringify({ field: field.field_name, value: JSON.parse(String(field.value_json)) }), JSON.stringify({ field: field.field_name, value: input.value }), input.reason.trim()),
   ]);
   await reconcileDocumentPackets(db, String(document.id));
   return { ok: true };
 }
 
-export async function reviewExtractedField(fieldId: string) {
+export async function reviewExtractedField(fieldId: string, actor = "Program manager") {
   const db = await ensureDatabase();
   const field = await db.prepare("SELECT * FROM document_field_evidence WHERE id = ?").bind(fieldId).first<Record<string, unknown>>();
   if (!field) throw new Error("Extracted field not found.");
@@ -663,14 +674,14 @@ export async function reviewExtractedField(fieldId: string) {
   if (value == null || String(value).trim() === "") throw new Error("A missing value cannot be verified. Enter a reviewer correction instead.");
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare("UPDATE document_field_evidence SET status = 'reviewed', reviewed_at = ?, reviewer = 'Program manager' WHERE id = ?").bind(now, fieldId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'extracted_field_verified', 'Program manager', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, field.document_id, now, JSON.stringify({ field: field.field_name, value: JSON.parse(String(field.value_json)) })),
+    db.prepare("UPDATE document_field_evidence SET status = 'reviewed', reviewed_at = ?, reviewer = ? WHERE id = ?").bind(now, actor, fieldId),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'extracted_field_verified', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, field.document_id, actor, now, JSON.stringify({ field: field.field_name, value: JSON.parse(String(field.value_json)) })),
   ]);
   await reconcileDocumentPackets(db, String(field.document_id));
   return { ok: true };
 }
 
-export async function decideClaim(input: { id: string; decision?: string; amountEligible?: number; reason?: string }) {
+export async function decideClaim(input: { id: string; decision?: string; amountEligible?: number; reason?: string; actor?: string }) {
   const db = await ensureDatabase();
   if (!input.reason?.trim() || !["eligible", "ineligible"].includes(String(input.decision))) throw new Error("Choose eligible or ineligible and document the reason.");
   const claim = await db.prepare("SELECT * FROM reimbursement_claims WHERE id = ? AND status <> 'superseded'").bind(input.id).first<Record<string, unknown>>();
@@ -683,30 +694,37 @@ export async function decideClaim(input: { id: string; decision?: string; amount
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE reimbursement_claims SET status = ?, amount_eligible_cents = ? WHERE id = ?").bind(input.decision, eligibleCents, input.id),
-    db.prepare("UPDATE eligibility_checks SET reviewer = 'Program manager', reviewed_at = ? WHERE claim_id = ?").bind(now, input.id),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'business_expense_decided', 'Program manager', ?, ?, ?, ?)")
-      .bind(`audit-${crypto.randomUUID()}`, claim.packet_id, now, JSON.stringify(claim), JSON.stringify({ decision: input.decision, amountEligibleCents: eligibleCents }), input.reason.trim()),
+    db.prepare("UPDATE eligibility_checks SET reviewer = ?, reviewed_at = ? WHERE claim_id = ?").bind(String(input.actor ?? "Program manager"), now, input.id),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'business_expense_decided', ?, ?, ?, ?, ?)")
+      .bind(`audit-${crypto.randomUUID()}`, claim.packet_id, String(input.actor ?? "Program manager"), now, JSON.stringify(claim), JSON.stringify({ decision: input.decision, amountEligibleCents: eligibleCents }), input.reason.trim()),
   ]);
   await reconcilePacket(db, String(claim.packet_id));
   return { ok: true };
 }
 
-export async function decideEligibilityCheck(input: { id: string; result?: string; reason?: string }) {
+export async function decideEligibilityCheck(input: { id: string; result?: string; reason?: string; actor?: string }) {
   const db = await ensureDatabase();
   if (!["pass", "fail"].includes(String(input.result)) || !input.reason?.trim()) throw new Error("Choose pass or fail and cite the evidence or controlling rule.");
-  const check = await db.prepare(`SELECT c.*, r.packet_id FROM eligibility_checks c JOIN reimbursement_claims r ON r.id = c.claim_id WHERE c.id = ? AND r.status <> 'superseded'`).bind(input.id).first<Record<string, unknown>>();
+  const check = await db.prepare(`SELECT c.*, r.packet_id, r.mou_id, p.source_document_id AS policy_source_document_id, m.document_id AS mou_source_document_id
+    FROM eligibility_checks c JOIN reimbursement_claims r ON r.id = c.claim_id
+    LEFT JOIN policies p ON p.id = c.policy_id LEFT JOIN mous m ON m.id = r.mou_id
+    WHERE c.id = ? AND r.status <> 'superseded'`).bind(input.id).first<Record<string, unknown>>();
   if (!check) throw new Error("Eligibility check not found.");
+  if (input.result === "pass") {
+    const source = check.authority_level === "Employer MOU" ? check.mou_source_document_id : check.policy_source_document_id;
+    if (!source) throw new Error("Link the specific governing source document before this check can pass.");
+  }
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare("UPDATE eligibility_checks SET result = ?, reason = ?, confidence = 100, reviewer = 'Program manager', reviewed_at = ? WHERE id = ?").bind(input.result, input.reason.trim(), now, input.id),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'eligibility_check_decided', 'Program manager', ?, ?, ?, ?)")
-      .bind(`audit-${crypto.randomUUID()}`, check.packet_id, now, JSON.stringify(check), JSON.stringify({ result: input.result }), input.reason.trim()),
+    db.prepare("UPDATE eligibility_checks SET result = ?, reason = ?, confidence = 100, reviewer = ?, reviewed_at = ? WHERE id = ?").bind(input.result, input.reason.trim(), String(input.actor ?? "Program manager"), now, input.id),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'eligibility_check_decided', ?, ?, ?, ?, ?)")
+      .bind(`audit-${crypto.randomUUID()}`, check.packet_id, String(input.actor ?? "Program manager"), now, JSON.stringify(check), JSON.stringify({ result: input.result }), input.reason.trim()),
   ]);
   await reconcilePacket(db, String(check.packet_id));
   return { ok: true };
 }
 
-export async function linkClaimSupportingDocument(input: { id: string; documentId?: string }) {
+export async function linkClaimSupportingDocument(input: { id: string; documentId?: string; actor?: string }) {
   const db = await ensureDatabase();
   if (!input.documentId) throw new Error("Choose a supporting document.");
   const claim = await db.prepare("SELECT * FROM reimbursement_claims WHERE id = ? AND claim_type = 'business_expense' AND status <> 'superseded'").bind(input.id).first<Record<string, unknown>>();
@@ -718,14 +736,14 @@ export async function linkClaimSupportingDocument(input: { id: string; documentI
   const now = new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE reimbursement_claims SET supporting_document_id = ? WHERE id = ?").bind(input.documentId, input.id),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'expense_support_linked', 'Program manager', ?, ?, ?, NULL)")
-      .bind(`audit-${crypto.randomUUID()}`, claim.packet_id, now, JSON.stringify({ supportingDocumentId: claim.supporting_document_id }), JSON.stringify({ claimId: input.id, supportingDocumentId: input.documentId, fileName: document.file_name })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'expense_support_linked', ?, ?, ?, ?, NULL)")
+      .bind(`audit-${crypto.randomUUID()}`, claim.packet_id, String(input.actor ?? "Program manager"), now, JSON.stringify({ supportingDocumentId: claim.supporting_document_id }), JSON.stringify({ claimId: input.id, supportingDocumentId: input.documentId, fileName: document.file_name })),
   ]);
   await reconcilePacket(db, String(claim.packet_id));
   return { ok: true };
 }
 
-export async function linkDocumentToPacket(input: { id: string; packetId?: string }) {
+export async function linkDocumentToPacket(input: { id: string; packetId?: string; actor?: string }) {
   const db = await ensureDatabase();
   if (!input.packetId) throw new Error("Choose a reimbursement packet.");
   const document = await db.prepare("SELECT * FROM documents WHERE id = ?").bind(input.id).first<Record<string, unknown>>();
@@ -736,15 +754,15 @@ export async function linkDocumentToPacket(input: { id: string; packetId?: strin
   if (existing) return { ok: true };
   const now = new Date().toISOString();
   const operations: D1PreparedStatement[] = [
-    db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, ?, ?, 'Program manager')").bind(`link-${crypto.randomUUID()}`, input.id, input.packetId, document.packet_id ? 0 : 1, now),
+    db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, ?, ?, ?)").bind(`link-${crypto.randomUUID()}`, input.id, input.packetId, document.packet_id ? 0 : 1, now, String(input.actor ?? "Program manager")),
     db.prepare("UPDATE documents SET packet_id = COALESCE(packet_id, ?) WHERE id = ?").bind(input.packetId, input.id),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'linked_to_packet', 'Program manager', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, input.id, now, JSON.stringify({ packetId: input.packetId })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'linked_to_packet', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, input.id, String(input.actor ?? "Program manager"), now, JSON.stringify({ packetId: input.packetId })),
   ];
   if (document.kind === "invoice" && Number(document.amount_cents) > 0) {
     const commitmentPacketId = String(document.packet_id ?? input.packetId);
     const ledger = await db.prepare("SELECT id FROM po_events WHERE packet_id = ? AND event_type = 'invoice_received'").bind(commitmentPacketId).first();
     if (!ledger) {
-      operations.push(db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_received', ?, ?, ?, 'Document triage')").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, input.packetId, document.amount_cents, packet.invoice_number ?? document.file_name, now.slice(0, 10)));
+      operations.push(db.prepare("INSERT INTO po_events VALUES (?, ?, ?, 'invoice_received', ?, ?, ?, ?)").bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, input.packetId, document.amount_cents, packet.invoice_number ?? document.file_name, now.slice(0, 10), String(input.actor ?? "Program manager")));
       operations.push(db.prepare("UPDATE packets SET invoice_amount_cents = ?, received_at = COALESCE(received_at, ?), status = 'needs_review' WHERE id = ?").bind(document.amount_cents, now, input.packetId));
     }
   }
@@ -755,6 +773,7 @@ export async function linkDocumentToPacket(input: { id: string; packetId?: strin
 
 export async function createEmployer(input: Record<string, unknown>) {
   const db = await ensureDatabase();
+  const actor = String(input.actor ?? "Program manager");
   const name = String(input.name ?? "").trim();
   const county = String(input.county ?? "").trim();
   const contactName = String(input.contactName ?? "").trim();
@@ -773,13 +792,14 @@ export async function createEmployer(input: Record<string, unknown>) {
       (id, employer_id, po_number, original_amount_cents, amendment_amount_cents, status, issued_at, effective_end)
       VALUES (?, ?, ?, ?, 0, 'active', ?, ?)`).bind(poId, id, poNumber, originalCents, effectiveStart, effectiveEnd),
     db.prepare("INSERT INTO mous VALUES (?, ?, ?, '1', ?, ?, 'current', ?, '{}', '[]', '[\"Itemized receipt\",\"Proof of payment\",\"Business purpose\"]', NULL, ?)").bind(mouId, id, mouCode, effectiveStart, effectiveEnd, JSON.stringify(allowed), now),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'employer', ?, 'employer_created', 'Program manager', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, id, now, JSON.stringify({ name, county, poNumber, originalFunding: Number(input.originalFunding), mouCode })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'employer', ?, 'employer_created', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, id, actor, now, JSON.stringify({ name, county, poNumber, originalFunding: Number(input.originalFunding), mouCode })),
   ]);
   return { ok: true, id };
 }
 
 export async function updateEmployer(input: Record<string, unknown>) {
   const db = await ensureDatabase();
+  const actor = String(input.actor ?? "Program manager");
   const id = String(input.id ?? "");
   const before = await db.prepare(`SELECT e.*, po.id AS purchase_order_id, po.po_number, po.issued_at, po.effective_end
     FROM employers e JOIN purchase_orders po ON po.employer_id = e.id AND po.status = 'active' WHERE e.id = ?`).bind(id).first<Record<string, unknown>>();
@@ -802,14 +822,15 @@ export async function updateEmployer(input: Record<string, unknown>) {
       .bind(values.name, values.county, values.contactName, values.contactEmail, values.arrangement, values.paySchedule, id),
     db.prepare("UPDATE purchase_orders SET po_number = ?, issued_at = ?, effective_end = ?, document_id = COALESCE(?, document_id) WHERE id = ?")
       .bind(values.poNumber, values.issuedAt, values.effectiveEnd, poDocumentId, before.purchase_order_id),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'employer', ?, 'employer_and_po_updated', 'Program manager', ?, ?, ?, NULL)")
-      .bind(`audit-${crypto.randomUUID()}`, id, now, JSON.stringify(before), JSON.stringify({ ...values, poDocumentId })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'employer', ?, 'employer_and_po_updated', ?, ?, ?, ?, NULL)")
+      .bind(`audit-${crypto.randomUUID()}`, id, actor, now, JSON.stringify(before), JSON.stringify({ ...values, poDocumentId })),
   ]);
   return { ok: true };
 }
 
 export async function createPacket(input: Record<string, unknown>) {
   const db = await ensureDatabase();
+  const actor = String(input.actor ?? "Program manager");
   const employerId = String(input.employerId ?? ""); const internName = String(input.internName ?? "").trim();
   const county = String(input.county ?? "").trim(); const placement = String(input.placement ?? "").trim();
   const periodStart = String(input.periodStart ?? ""); const periodEnd = String(input.periodEnd ?? "");
@@ -830,7 +851,7 @@ export async function createPacket(input: Record<string, unknown>) {
        invoice_number, invoice_amount_cents, wage_amount_cents, business_amount_cents, confidence, received_at, approved_at, paid_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'invoice_not_received', 2, ?, NULL, 0, 0, 0, 0, NULL, NULL, NULL)`)
       .bind(packetId, employerId, purchaseOrders[0].id, internId, `${periodStart}–${periodEnd} reimbursement · ${internName}`, periodStart, periodEnd, settings?.invoice_deadline ?? periodEnd),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_created', 'Program manager', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packetId, now, JSON.stringify({ employerId, internName, placement, periodStart, periodEnd, purchaseOrderId: purchaseOrders[0].id })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_created', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify({ employerId, internName, placement, periodStart, periodEnd, purchaseOrderId: purchaseOrders[0].id })),
   ]);
   await reconcilePacket(db, packetId);
   return { ok: true, id: packetId };
@@ -838,6 +859,7 @@ export async function createPacket(input: Record<string, unknown>) {
 
 export async function createMouVersion(input: Record<string, unknown>) {
   const db = await ensureDatabase();
+  const actor = String(input.actor ?? "Program manager");
   const employerId = String(input.employerId ?? ""); const code = String(input.code ?? "").trim(); const version = String(input.version ?? "").trim();
   const effectiveStart = String(input.effectiveStart ?? ""); const effectiveEnd = String(input.effectiveEnd ?? "");
   if (!employerId || !code || !version || !effectiveStart || !effectiveEnd || effectiveEnd < effectiveStart) throw new Error("Complete the employer, MOU code, version, and valid effective period.");
@@ -860,13 +882,14 @@ export async function createMouVersion(input: Record<string, unknown>) {
        limits_json, conditions_json, evidence_requirements_json, document_id, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ?, ?, ?)`).bind(id, employerId, code, version, effectiveStart, effectiveEnd, JSON.stringify(allowed), JSON.stringify(limits), JSON.stringify(conditions), JSON.stringify(evidence), documentId, now),
     db.prepare("UPDATE employers SET mou_code = ?, mou_status = 'current' WHERE id = ?").bind(code, employerId),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'employer', ?, 'mou_version_created', 'Program manager', ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, employerId, now, JSON.stringify({ mouId: id, code, version, effectiveStart, effectiveEnd, allowed, limits, conditions, evidence, documentId })),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'employer', ?, 'mou_version_created', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, employerId, actor, now, JSON.stringify({ mouId: id, code, version, effectiveStart, effectiveEnd, allowed, limits, conditions, evidence, documentId })),
   ]);
   return { ok: true, id };
 }
 
 export async function updateProgramSettings(input: Record<string, unknown>) {
   const db = await ensureDatabase();
+  const actor = String(input.actor ?? "Program manager");
   const before = await db.prepare("SELECT * FROM program_settings WHERE id = 'program-land-earn'").first<Record<string, unknown>>();
   const hourlyRateCents = Math.round(Number(input.hourlyRate ?? 0) * 100);
   const retentionYears = Number(input.retentionYears ?? 7); const poWarningPercent = Number(input.poWarningPercent ?? 15);
@@ -875,7 +898,29 @@ export async function updateProgramSettings(input: Record<string, unknown>) {
   await db.batch([
     db.prepare(`UPDATE program_settings SET hourly_rate_cents = ?, fiscal_year_start = ?, fiscal_year_end = ?, invoice_deadline = ?, payment_deadline = ?, retention_years = ?, po_warning_percent = ? WHERE id = 'program-land-earn'`)
       .bind(hourlyRateCents, input.fiscalYearStart, input.fiscalYearEnd, input.invoiceDeadline, input.paymentDeadline, retentionYears, poWarningPercent),
-    db.prepare("INSERT INTO audit_events VALUES (?, 'program', 'program-land-earn', 'settings_updated', 'Program manager', ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, now, JSON.stringify(before), JSON.stringify(input)),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'program', 'program-land-earn', 'settings_updated', ?, ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, actor, now, JSON.stringify(before), JSON.stringify({ ...input, actor: undefined })),
+  ]);
+  return { ok: true };
+}
+
+export async function updatePolicySource(input: Record<string, unknown>) {
+  const db = await ensureDatabase();
+  const id = String(input.id ?? "");
+  const documentId = String(input.documentId ?? "");
+  const version = String(input.version ?? "").trim();
+  const effectiveAt = String(input.effectiveAt ?? "");
+  const effectiveEnd = String(input.effectiveEnd ?? "") || null;
+  const actor = String(input.actor ?? "Program manager");
+  if (!id || !documentId || !version || !effectiveAt || (effectiveEnd && effectiveEnd < effectiveAt)) throw new Error("Choose a governing source, version, and valid effective period.");
+  const before = await db.prepare("SELECT * FROM policies WHERE id = ?").bind(id).first<Record<string, unknown>>();
+  if (!before) throw new Error("Eligibility policy not found.");
+  const source = await db.prepare("SELECT id, file_name FROM documents WHERE id = ? AND kind = 'grant_evidence'").bind(documentId).first<Record<string, unknown>>();
+  if (!source) throw new Error("The governing source must be an uploaded grant-evidence document.");
+  const now = new Date().toISOString();
+  const after = { ...before, status: "verified", version, effective_at: effectiveAt, effective_end: effectiveEnd, source_document_id: documentId };
+  await db.batch([
+    db.prepare("UPDATE policies SET status = 'verified', version = ?, effective_at = ?, effective_end = ?, source_document_id = ? WHERE id = ?").bind(version, effectiveAt, effectiveEnd, documentId, id),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'policy', ?, 'governing_source_linked', ?, ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, id, actor, now, JSON.stringify(before), JSON.stringify(after)),
   ]);
   return { ok: true };
 }
@@ -1032,7 +1077,7 @@ async function reconcilePacket(db: Db, packetId: string) {
   await db.prepare("UPDATE packets SET status = ? WHERE id = ? AND status NOT IN ('approved','paid')").bind(nextStatus, packetId).run();
 }
 
-async function storeOneDocument(db: Db, file: File, form: FormData) {
+async function storeOneDocument(db: Db, file: File, form: FormData, actor: string) {
   const employerId = String(form.get("employerId") ?? "");
   const packetId = String(form.get("packetId") ?? "") || null;
   const kind = String(form.get("kind") ?? "unknown");
@@ -1055,7 +1100,7 @@ async function storeOneDocument(db: Db, file: File, form: FormData) {
   if (duplicate) {
     if (packetId) {
       const linked = await db.prepare("SELECT id FROM document_packet_links WHERE document_id = ? AND packet_id = ?").bind(duplicate.id, packetId).first();
-      if (!linked) await db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, 0, ?, 'Program manager')").bind(`link-${crypto.randomUUID()}`, duplicate.id, packetId, new Date().toISOString()).run();
+      if (!linked) await db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, 0, ?, ?)").bind(`link-${crypto.randomUUID()}`, duplicate.id, packetId, new Date().toISOString(), actor).run();
     }
     return { id: duplicate.id, fileName: duplicate.file_name, kind, status: "duplicate", duplicate: true };
   }
@@ -1091,11 +1136,11 @@ async function storeOneDocument(db: Db, file: File, form: FormData) {
   const operations: D1PreparedStatement[] = [db.prepare(`INSERT INTO documents
     (id, employer_id, packet_id, kind, file_name, r2_key, status, amount_cents, extracted_json,
      content_hash, classification_confidence, extraction_provider, uploader, source, processed_at, uploaded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Program manager', 'web_upload', ?, ?)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'web_upload', ?, ?)`)
     .bind(id, employerId, packetId, detectedKind, file.name, env.FILES ? key : null, status, effectiveAmountCents,
       JSON.stringify({ ...extraction, fileSize: file.size, contentType: file.type }), contentHash,
-      extraction.classificationConfidence, extraction.provider, now, now)];
-  if (packetId) operations.push(db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, 1, ?, 'Program manager')").bind(`link-${crypto.randomUUID()}`, id, packetId, now));
+      extraction.classificationConfidence, extraction.provider, actor, now, now)];
+  if (packetId) operations.push(db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, 1, ?, ?)").bind(`link-${crypto.randomUUID()}`, id, packetId, now, actor));
   for (const field of extraction.fields) operations.push(db.prepare("INSERT INTO document_field_evidence VALUES (?, ?, ?, ?, ?, ?, 'extracted', NULL, NULL, NULL)")
     .bind(`field-${crypto.randomUUID()}`, id, field.name, JSON.stringify(field.value), Math.round(field.confidence), field.source));
   if (packetId) for (const activity of extraction.activities) operations.push(db.prepare(`INSERT INTO activity_hours
@@ -1108,8 +1153,8 @@ async function storeOneDocument(db: Db, file: File, form: FormData) {
     priorClaims = await rows<{ id: string; claim_type: string; description: string; category: string; amount_requested_cents: number; supporting_document_id: string | null }>(db, "SELECT id, claim_type, description, category, amount_requested_cents, supporting_document_id FROM reimbursement_claims WHERE packet_id = ? AND status <> 'superseded'", [packetId]);
     if (priorClaims.length) {
       operations.push(db.prepare("UPDATE reimbursement_claims SET status = 'superseded', amount_eligible_cents = 0 WHERE packet_id = ? AND status <> 'superseded'").bind(packetId));
-      operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'invoice_claims_superseded', 'Document intake', ?, ?, ?, NULL)")
-        .bind(`audit-${crypto.randomUUID()}`, packetId, now, JSON.stringify({ claimIds: priorClaims.map((claim) => claim.id) }), JSON.stringify({ replacementDocumentId: id })));
+      operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'invoice_claims_superseded', ?, ?, ?, ?, NULL)")
+        .bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify({ claimIds: priorClaims.map((claim) => claim.id) }), JSON.stringify({ replacementDocumentId: id })));
     }
   }
   if (packetId && detectedKind === "invoice") for (const claim of extraction.claims) {
@@ -1152,12 +1197,12 @@ async function storeOneDocument(db: Db, file: File, form: FormData) {
         Math.round(expenseSubtotal * 100), Math.round(extraction.classificationConfidence), now, packetId));
     if (ledgerAmount !== 0) operations.push(db.prepare(`INSERT INTO po_events
       (id, purchase_order_id, packet_id, event_type, amount_cents, reference, occurred_at, actor)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'Document intake')`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(`evt-${crypto.randomUUID()}`, packet.purchase_order_id, packetId, eventType, ledgerAmount,
-        packet.invoice_number ?? file.name, now.slice(0, 10)));
+        packet.invoice_number ?? file.name, now.slice(0, 10), actor));
   }
-  operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'uploaded_and_processed', 'Program manager', ?, NULL, ?, NULL)")
-    .bind(`audit-${crypto.randomUUID()}`, id, now, JSON.stringify({ fileName: file.name, detectedKind, provider: extraction.provider, packetId, confidence: extraction.classificationConfidence })));
+  operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'uploaded_and_processed', ?, ?, NULL, ?, NULL)")
+    .bind(`audit-${crypto.randomUUID()}`, id, actor, now, JSON.stringify({ fileName: file.name, detectedKind, provider: extraction.provider, packetId, confidence: extraction.classificationConfidence })));
   await db.batch(operations);
   if (packetId) {
     if (detectedKind === "invoice") {
@@ -1185,31 +1230,31 @@ async function storeOneDocument(db: Db, file: File, form: FormData) {
   return { id, fileName: file.name, kind: detectedKind, status, duplicate: false, confidence: extraction.classificationConfidence, provider: extraction.provider, warnings: extraction.warnings };
 }
 
-export async function storeDocuments(form: FormData) {
+export async function storeDocuments(form: FormData, actor = "Program manager") {
   const db = await ensureDatabase();
   const candidates = [...form.getAll("files"), ...form.getAll("file")].filter((item): item is File => item instanceof File && item.size > 0);
   if (!candidates.length) throw new Error("Choose at least one file.");
   const unique = candidates.filter((file, index) => candidates.findIndex((candidate) => candidate.name === file.name && candidate.size === file.size) === index);
   const documents = [];
-  for (const file of unique) documents.push(await storeOneDocument(db, file, form));
+  for (const file of unique) documents.push(await storeOneDocument(db, file, form, actor));
   return { ok: true, documents };
 }
 
-export async function getDocumentOriginal(documentId: string) {
+export async function getDocumentOriginal(documentId: string, actor = "Authorized user") {
   const db = await ensureDatabase();
   const document = await db.prepare("SELECT * FROM documents WHERE id = ?").bind(documentId).first<Record<string, unknown>>();
   if (!document?.r2_key || !env.FILES) throw new Error("The original file is not available in document storage.");
   const object = await env.FILES.get(String(document.r2_key));
   if (!object) throw new Error("The original file could not be found.");
   const now = new Date().toISOString();
-  await db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'original_viewed', 'Authorized user', ?, NULL, NULL, NULL)")
-    .bind(`audit-${crypto.randomUUID()}`, documentId, now).run();
+  await db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'original_viewed', ?, ?, NULL, NULL, NULL)")
+    .bind(`audit-${crypto.randomUUID()}`, documentId, actor, now).run();
   return { body: object.body, contentType: object.httpMetadata?.contentType ?? "application/octet-stream", fileName: String(document.file_name) };
 }
 
 const htmlEscape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
 
-export async function buildPacketExport(packetId: string) {
+export async function buildPacketExport(packetId: string, actor = "Authorized user") {
   const data = await getDashboardData();
   const packet = data.packets.find((item) => item.id === packetId);
   if (!packet) throw new Error("Packet not found.");
@@ -1224,17 +1269,17 @@ export async function buildPacketExport(packetId: string) {
   <h2>Exceptions and decisions</h2><table><tr><th>Priority</th><th>Issue</th><th>Owner</th><th>Status</th></tr>${rows(packet.exceptions.map((item) => `<tr><td>P${item.severity}</td><td class="${item.status === "open" && item.severity === 1 ? "blocker" : ""}"><b>${htmlEscape(item.title)}</b><br>${htmlEscape(item.detail)}</td><td>${htmlEscape(item.ownerRole)}</td><td>${htmlEscape(item.status)}</td></tr>`))}</table>
   <h2>Activity hours</h2><table><tr><th>Category</th><th>Hours</th><th>Source</th></tr>${rows(packet.activities.map((item) => `<tr><td>${htmlEscape(item.category)}</td><td>${item.hours}</td><td>${htmlEscape(item.source)}</td></tr>`))}</table>
   <h2>Source documents and extracted fields</h2>${rows(packet.documents.map((document) => `<h3>${htmlEscape(document.fileName)} <span class="stamp">${htmlEscape(document.status)}</span></h3><p class="meta">${htmlEscape(document.kind)} · ${document.classificationConfidence}% classification confidence · ${htmlEscape(document.extractionProvider)}</p><table><tr><th>Field</th><th>Value</th><th>Confidence</th><th>Source</th></tr>${rows(document.fieldEvidence.map((field) => `<tr><td>${htmlEscape(field.name)}</td><td>${htmlEscape(field.value)}</td><td>${field.confidence}%</td><td>${htmlEscape(field.source)}</td></tr>`))}</table>`))}
-  <h2>Reimbursement claims and eligibility</h2>${rows(packet.claims.map((claim) => `<h3>${htmlEscape(claim.description)} · $${claim.amountRequested.toFixed(2)}</h3><table><tr><th>Authority</th><th>Result</th><th>Reason</th></tr>${rows(claim.checks.map((check) => `<tr><td>${htmlEscape(check.authorityLevel)}</td><td>${htmlEscape(check.result)}</td><td>${htmlEscape(check.reason)}</td></tr>`))}</table>`))}
+  <h2>Reimbursement claims and eligibility</h2>${rows(packet.claims.map((claim) => `<h3>${htmlEscape(claim.description)} · $${claim.amountRequested.toFixed(2)}</h3><table><tr><th>Authority</th><th>Governing evidence</th><th>Result</th><th>Reason</th></tr>${rows(claim.checks.map((check) => `<tr><td>${htmlEscape(check.authorityLevel)}</td><td>${htmlEscape(check.policyCode ?? "Not linked")} ${check.policyVersion ? `v${htmlEscape(check.policyVersion)}` : ""}<br>${htmlEscape(check.sourceDocumentName ?? "Source not linked")}</td><td>${htmlEscape(check.result)}</td><td>${htmlEscape(check.reason)}</td></tr>`))}</table>`))}
   <h2>Purchase-order ledger</h2><table><tr><th>Date</th><th>Event</th><th>Reference</th><th>Amount</th><th>Actor</th></tr>${rows(ledger.map((event) => `<tr><td>${htmlEscape(event.occurredAt)}</td><td>${htmlEscape(event.eventType)}</td><td>${htmlEscape(event.reference)}</td><td class="amount">$${event.amount.toFixed(2)}</td><td>${htmlEscape(event.actor)}</td></tr>`))}</table>
   <h2>Audit history</h2><table><tr><th>Date</th><th>Action</th><th>Actor</th><th>Reason</th></tr>${rows(packet.history.map((event) => `<tr><td>${htmlEscape(event.occurredAt)}</td><td>${htmlEscape(event.action)}</td><td>${htmlEscape(event.actor)}</td><td>${htmlEscape(event.reason ?? "")}</td></tr>`))}</table>
   <p class="footer">Generated ${htmlEscape(data.generatedAt)}. Human approval remains required. Original documents remain in protected storage and are listed above.</p></body></html>`;
   const db = await ensureDatabase();
-  await db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_exported', 'Authorized user', ?, NULL, NULL, NULL)").bind(`audit-${crypto.randomUUID()}`, packetId, new Date().toISOString()).run();
+  await db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_exported', ?, ?, NULL, NULL, NULL)").bind(`audit-${crypto.randomUUID()}`, packetId, actor, new Date().toISOString()).run();
   return { html, fileName: `${packet.label.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || packetId}.html` };
 }
 
-export async function buildPacketArchive(packetId: string) {
-  const summary = await buildPacketExport(packetId);
+export async function buildPacketArchive(packetId: string, actor = "Authorized user") {
+  const summary = await buildPacketExport(packetId, actor);
   const db = await ensureDatabase();
   const documents = await rows<{ id: string; file_name: string; r2_key: string | null }>(db, `SELECT DISTINCT d.id, d.file_name, d.r2_key FROM documents d
     LEFT JOIN document_packet_links l ON l.document_id = d.id WHERE d.packet_id = ? OR l.packet_id = ? ORDER BY d.uploaded_at`, [packetId, packetId]);
@@ -1250,7 +1295,7 @@ export async function buildPacketArchive(packetId: string) {
   }
   files["README.txt"] = strToU8(`Land and Earn fiscal review archive\nPacket: ${packetId}\nSupporting documents included: ${included} of ${documents.length}\nGenerated: ${new Date().toISOString()}\n\nOpen packet-summary.html for normalized facts, validation results, funding ledger, and audit history. Originals remain subject to authorized access and the configured retention policy.\n`);
   const now = new Date().toISOString();
-  await db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_archive_exported', 'Authorized user', ?, NULL, ?, NULL)")
-    .bind(`audit-${crypto.randomUUID()}`, packetId, now, JSON.stringify({ supportingDocumentsIncluded: included, supportingDocumentsListed: documents.length })).run();
+  await db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_archive_exported', ?, ?, NULL, ?, NULL)")
+    .bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify({ supportingDocumentsIncluded: included, supportingDocumentsListed: documents.length })).run();
   return { body: zipSync(files, { level: 6 }), fileName: summary.fileName.replace(/\.html$/, ".zip") };
 }
