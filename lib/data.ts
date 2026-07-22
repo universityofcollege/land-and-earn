@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { strToU8, zipSync } from "fflate";
 import type { DashboardData } from "./types";
 import { extractDocument, sha256, type DocumentExtraction } from "./extraction";
+import { hasGoverningSource } from "./policy";
 
 type Db = D1Database;
 
@@ -71,7 +72,9 @@ const schemaStatements = [
   )`,
   `CREATE TABLE IF NOT EXISTS policies (
     id TEXT PRIMARY KEY, level TEXT NOT NULL, title TEXT NOT NULL,
-    code TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL, effective_at TEXT NOT NULL
+    code TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL, effective_at TEXT NOT NULL,
+    effective_end TEXT, version TEXT NOT NULL DEFAULT '1', source_document_id TEXT,
+    public_sources_json TEXT NOT NULL DEFAULT '[]', sources_verified_at TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS program_settings (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, hourly_rate_cents INTEGER NOT NULL,
@@ -155,7 +158,7 @@ export async function ensureDatabase() {
   await ensureDocumentColumns(db);
   await ensureColumns(db, "interns", [["supervisor_name", "TEXT"], ["supervisor_email", "TEXT"]]);
   await ensureColumns(db, "reminder_drafts", [["recipient_name", "TEXT"], ["recipient_email", "TEXT"], ["recipient_role", "TEXT NOT NULL DEFAULT 'Employer of record'"]]);
-  await ensureColumns(db, "policies", [["effective_end", "TEXT"], ["version", "TEXT NOT NULL DEFAULT '1'"], ["source_document_id", "TEXT"]]);
+  await ensureColumns(db, "policies", [["effective_end", "TEXT"], ["version", "TEXT NOT NULL DEFAULT '1'"], ["source_document_id", "TEXT"], ["public_sources_json", "TEXT NOT NULL DEFAULT '[]'"], ["sources_verified_at", "TEXT"]]);
   await ensureColumns(db, "program_settings", [["retention_anchor_date", "TEXT"], ["retention_policy_confirmed", "INTEGER NOT NULL DEFAULT 0"], ["retention_confirmed_at", "TEXT"], ["retention_confirmed_by", "TEXT"]]);
   await ensureColumns(db, "packet_exceptions", [["resolution_type", "TEXT"], ["resolution_reason", "TEXT"], ["resolved_by", "TEXT"]]);
   await ensureColumns(db, "reimbursement_claims", [["supporting_document_id", "TEXT REFERENCES documents(id)"]]);
@@ -181,6 +184,11 @@ async function ensureOperationalDefaults(db: Db) {
       '["Itemized receipt","Proof of payment","Business purpose"]', NULL, '2025-07-01')`)
     .bind(`mou-${employer.id}-v1`, employer.id, employer.mou_code));
   if (statements.length) await db.batch(statements);
+  const officialSources = [
+    db.prepare("UPDATE policies SET public_sources_json = ?, sources_verified_at = ? WHERE id = 'pol-irs' AND public_sources_json = '[]'").bind(JSON.stringify([{ label: "IRS Publication 583 (12/2024)", url: "https://www.irs.gov/publications/p583" }]), "2026-07-22"),
+    db.prepare("UPDATE policies SET public_sources_json = ?, sources_verified_at = ? WHERE id = 'pol-arc' AND public_sources_json = '[]'").bind(JSON.stringify([{ label: "ARC Grant Administration Manual for Non-Construction Grants", url: "https://www.arc.gov/resource/grant-administration-manual-for-arc-non-construction-grants/" }, { label: "2 CFR Part 200, Subpart E — Cost Principles", url: "https://www.ecfr.gov/current/title-2/subtitle-A/chapter-II/part-200/subpart-E" }]), "2026-07-22"),
+  ];
+  await db.batch(officialSources);
 }
 
 async function ensureDocumentColumns(db: Db) {
@@ -301,9 +309,9 @@ async function seedDatabase(db: Db) {
     ["pol-grant", "Land and Earn", "Approved award and budget", "ARC-LAE-2024", "needs source", "The signed grant agreement, approved budget, and amendments control project-specific eligibility and must be loaded before live determinations.", "2024-07-01"],
     ["pol-mou", "Employer MOU", "Employer-specific expense terms", "MOU-LAE-2026", "current", "The effective employer MOU sets expense categories, limits, conditions, and required evidence. The strictest applicable rule controls.", "2025-07-01"],
   ];
-  for (const policy of policies) add("INSERT INTO policies VALUES (?, ?, ?, ?, ?, ?, ?)", ...policy);
+  for (const policy of policies) add("INSERT INTO policies (id, level, title, code, status, summary, effective_at) VALUES (?, ?, ?, ?, ?, ?, ?)", ...policy);
 
-  add("INSERT INTO program_settings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", "program-land-earn", "Land and Earn", 1600, "2025-07-01", "2026-06-30", "2026-06-30", "2026-07-31", 7, 15);
+  add("INSERT INTO program_settings (id, name, hourly_rate_cents, fiscal_year_start, fiscal_year_end, invoice_deadline, payment_deadline, retention_years, po_warning_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", "program-land-earn", "Land and Earn", 1600, "2025-07-01", "2026-06-30", "2026-06-30", "2026-07-31", 7, 15);
   const mouRecords = [
     ["mou-pineville-v1", "emp-pineville", "MOU-LAE-2026-01", "1", "2025-07-01", "2026-06-30", "current", JSON.stringify(["Required work apparel", "Required training", "Program supplies"]), JSON.stringify({ "Required work apparel": 2500, "Required training": 1500 }), JSON.stringify(["Expense must directly support the intern placement"]), JSON.stringify(["Itemized receipt", "Proof of payment", "Business purpose"]), null, "2025-07-01"],
     ["mou-bell-v1", "emp-bell", "MOU-LAE-2026-02", "1", "2025-07-01", "2026-06-30", "current", JSON.stringify(["Required training", "Program supplies"]), JSON.stringify({ "Required training": 2000 }), JSON.stringify(["Expense must be within the approved program period"]), JSON.stringify(["Invoice or receipt", "Proof of payment", "Business purpose"]), null, "2025-07-01"],
@@ -406,10 +414,11 @@ export async function getDashboardData(): Promise<Omit<DashboardData, "session">
       const policy = policyRows.find((item) => item.id === check.policy_id);
       const mou = String(check.authority_level) === "Employer MOU" ? mouRows.find((item) => item.id === claim.mou_id) : null;
       const governingDocumentId = mou?.document_id ?? policy?.source_document_id ?? null;
+      const publicSources = mou ? [] : JSON.parse(String(policy?.public_sources_json ?? "[]")) as Array<{ label: string; url: string }>;
       return { id: String(check.id), authorityLevel: String(check.authority_level), result: String(check.result), reason: String(check.reason), confidence: Number(check.confidence), reviewedAt: check.reviewed_at ? String(check.reviewed_at) : null,
         policyId: check.policy_id ? String(check.policy_id) : null, policyCode: mou?.code ? String(mou.code) : policy?.code ? String(policy.code) : null, policyVersion: mou?.version ? String(mou.version) : policy?.version ? String(policy.version) : null,
         sourceDocumentId: governingDocumentId ? String(governingDocumentId) : null,
-        sourceDocumentName: governingDocumentId ? String(documentRows.find((document) => document.id === governingDocumentId)?.file_name ?? "Governing source") : null };
+        sourceDocumentName: governingDocumentId ? String(documentRows.find((document) => document.id === governingDocumentId)?.file_name ?? "Governing source") : null, publicSources };
     }),
   }));
   const historyFor = (packetId: string) => auditRows.filter((event) => event.entity_id === packetId || (event.entity_type === "document" && documentsFor(packetId).some((document) => document.id === event.entity_id))).map((event) => ({
@@ -457,6 +466,7 @@ export async function getDashboardData(): Promise<Omit<DashboardData, "session">
       status: String(row.status), summary: String(row.summary), effectiveAt: String(row.effective_at), effectiveEnd: row.effective_end ? String(row.effective_end) : null,
       version: String(row.version ?? "1"), sourceDocumentId: row.source_document_id ? String(row.source_document_id) : null,
       sourceDocumentName: row.source_document_id ? String(documentRows.find((document) => document.id === row.source_document_id)?.file_name ?? "Governing source") : null,
+      publicSources: JSON.parse(String(row.public_sources_json ?? "[]")) as Array<{ label: string; url: string }>, sourcesVerifiedAt: row.sources_verified_at ? String(row.sources_verified_at) : null,
     })),
     settings: { id: String(settingsRow.id), name: String(settingsRow.name), hourlyRate: cents(settingsRow.hourly_rate_cents), fiscalYearStart: String(settingsRow.fiscal_year_start), fiscalYearEnd: String(settingsRow.fiscal_year_end), invoiceDeadline: String(settingsRow.invoice_deadline), paymentDeadline: String(settingsRow.payment_deadline), retentionYears: Number(settingsRow.retention_years), poWarningPercent: Number(settingsRow.po_warning_percent), retentionAnchorDate: settingsRow.retention_anchor_date ? String(settingsRow.retention_anchor_date) : null, retentionPolicyConfirmed: Boolean(settingsRow.retention_policy_confirmed), retentionConfirmedAt: settingsRow.retention_confirmed_at ? String(settingsRow.retention_confirmed_at) : null, retentionConfirmedBy: settingsRow.retention_confirmed_by ? String(settingsRow.retention_confirmed_by) : null, retentionEligibleAt },
     mous: mouRows.map((row) => ({ id: String(row.id), employerId: String(row.employer_id), code: String(row.code), version: String(row.version), effectiveStart: String(row.effective_start), effectiveEnd: String(row.effective_end), status: String(row.status), allowedExpenses: JSON.parse(String(row.allowed_expenses_json || "[]")) as string[], limits: JSON.parse(String(row.limits_json || "{}")) as Record<string, number>, conditions: JSON.parse(String(row.conditions_json || "[]")) as string[], evidenceRequirements: JSON.parse(String(row.evidence_requirements_json || "[]")) as string[], documentId: row.document_id ? String(row.document_id) : null, documentName: row.document_id ? String(documentRows.find((document) => document.id === row.document_id)?.file_name ?? "MOU source") : null })),
@@ -792,14 +802,14 @@ export async function decideClaim(input: { id: string; decision?: string; amount
 export async function decideEligibilityCheck(input: { id: string; result?: string; reason?: string; actor?: string }) {
   const db = await ensureDatabase();
   if (!["pass", "fail"].includes(String(input.result)) || !input.reason?.trim()) throw new Error("Choose pass or fail and cite the evidence or controlling rule.");
-  const check = await db.prepare(`SELECT c.*, r.packet_id, r.mou_id, p.source_document_id AS policy_source_document_id, m.document_id AS mou_source_document_id
+  const check = await db.prepare(`SELECT c.*, r.packet_id, r.mou_id, p.source_document_id AS policy_source_document_id, p.public_sources_json, m.document_id AS mou_source_document_id
     FROM eligibility_checks c JOIN reimbursement_claims r ON r.id = c.claim_id
     LEFT JOIN policies p ON p.id = c.policy_id LEFT JOIN mous m ON m.id = r.mou_id
     WHERE c.id = ? AND r.status <> 'superseded'`).bind(input.id).first<Record<string, unknown>>();
   if (!check) throw new Error("Eligibility check not found.");
   if (input.result === "pass") {
-    const source = check.authority_level === "Employer MOU" ? check.mou_source_document_id : check.policy_source_document_id;
-    if (!source) throw new Error("Link the specific governing source document before this check can pass.");
+    const publicSources = check.authority_level === "Employer MOU" ? [] : JSON.parse(String(check.public_sources_json ?? "[]")) as unknown[];
+    if (!hasGoverningSource({ authorityLevel: String(check.authority_level), policyDocumentId: check.policy_source_document_id, mouDocumentId: check.mou_source_document_id, publicSources })) throw new Error("Link the specific governing source document before this check can pass.");
   }
   const now = new Date().toISOString();
   await db.batch([
@@ -1362,7 +1372,7 @@ export async function buildPacketExport(packetId: string, actor = "Authorized us
   <h2>Exceptions and decisions</h2><table><tr><th>Priority</th><th>Issue</th><th>Owner</th><th>Status</th></tr>${rows(packet.exceptions.map((item) => `<tr><td>P${item.severity}</td><td class="${item.status === "open" && item.severity === 1 ? "blocker" : ""}"><b>${htmlEscape(item.title)}</b><br>${htmlEscape(item.detail)}</td><td>${htmlEscape(item.ownerRole)}</td><td>${htmlEscape(item.status)}</td></tr>`))}</table>
   <h2>Activity hours</h2><table><tr><th>Category</th><th>Hours</th><th>Source</th></tr>${rows(packet.activities.map((item) => `<tr><td>${htmlEscape(item.category)}</td><td>${item.hours}</td><td>${htmlEscape(item.source)}</td></tr>`))}</table>
   <h2>Source documents and extracted fields</h2>${rows(packet.documents.map((document) => `<h3>${htmlEscape(document.fileName)} <span class="stamp">${htmlEscape(document.status)}</span></h3><p class="meta">${htmlEscape(document.kind)} · ${document.classificationConfidence}% classification confidence · ${htmlEscape(document.extractionProvider)}</p><table><tr><th>Field</th><th>Value</th><th>Confidence</th><th>Source</th></tr>${rows(document.fieldEvidence.map((field) => `<tr><td>${htmlEscape(field.name)}</td><td>${htmlEscape(field.value)}</td><td>${field.confidence}%</td><td>${htmlEscape(field.source)}</td></tr>`))}</table>`))}
-  <h2>Reimbursement claims and eligibility</h2>${rows(packet.claims.map((claim) => `<h3>${htmlEscape(claim.description)} · $${claim.amountRequested.toFixed(2)}</h3><table><tr><th>Authority</th><th>Governing evidence</th><th>Result</th><th>Reason</th></tr>${rows(claim.checks.map((check) => `<tr><td>${htmlEscape(check.authorityLevel)}</td><td>${htmlEscape(check.policyCode ?? "Not linked")} ${check.policyVersion ? `v${htmlEscape(check.policyVersion)}` : ""}<br>${htmlEscape(check.sourceDocumentName ?? "Source not linked")}</td><td>${htmlEscape(check.result)}</td><td>${htmlEscape(check.reason)}</td></tr>`))}</table>`))}
+  <h2>Reimbursement claims and eligibility</h2>${rows(packet.claims.map((claim) => `<h3>${htmlEscape(claim.description)} · $${claim.amountRequested.toFixed(2)}</h3><table><tr><th>Authority</th><th>Governing evidence</th><th>Result</th><th>Reason</th></tr>${rows(claim.checks.map((check) => `<tr><td>${htmlEscape(check.authorityLevel)}</td><td>${htmlEscape(check.policyCode ?? "Not linked")} ${check.policyVersion ? `v${htmlEscape(check.policyVersion)}` : ""}<br>${htmlEscape((check.sourceDocumentName ?? check.publicSources.map((source) => source.label).join("; ")) || "Source not linked")}</td><td>${htmlEscape(check.result)}</td><td>${htmlEscape(check.reason)}</td></tr>`))}</table>`))}
   <h2>Purchase-order ledger</h2><table><tr><th>Date</th><th>Event</th><th>Reference</th><th>Amount</th><th>Actor</th></tr>${rows(ledger.map((event) => `<tr><td>${htmlEscape(event.occurredAt)}</td><td>${htmlEscape(event.eventType)}</td><td>${htmlEscape(event.reference)}</td><td class="amount">$${event.amount.toFixed(2)}</td><td>${htmlEscape(event.actor)}</td></tr>`))}</table>
   <h2>Audit history</h2><table><tr><th>Date</th><th>Action</th><th>Actor</th><th>Reason</th></tr>${rows(packet.history.map((event) => `<tr><td>${htmlEscape(event.occurredAt)}</td><td>${htmlEscape(event.action)}</td><td>${htmlEscape(event.actor)}</td><td>${htmlEscape(event.reason ?? "")}</td></tr>`))}</table>
   <p class="footer">Generated ${htmlEscape(data.generatedAt)}. Human approval remains required. Original documents remain in protected storage and are listed above.</p></body></html>`;

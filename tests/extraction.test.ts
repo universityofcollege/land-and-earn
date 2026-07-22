@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { extractDocument, sha256 } from "../lib/extraction.ts";
+import { hasGoverningSource } from "../lib/policy.ts";
 
 async function fixture(name: string) {
   const bytes = await readFile(new URL(`./fixtures/${name}`, import.meta.url));
@@ -75,4 +76,12 @@ test("hashing is stable and content-sensitive", async () => {
   const changed = new File(["Payroll earnings report\nGross pay: $321.00"], "redbird-payroll.csv", { type: "text/csv" });
   assert.equal(await sha256(first), await sha256(second));
   assert.notEqual(await sha256(second), await sha256(changed));
+});
+
+test("accepts official public authority but still requires a signed employer MOU", () => {
+  assert.equal(hasGoverningSource({ authorityLevel: "IRS baseline", publicSources: [{ label: "IRS", url: "https://www.irs.gov/publications/p583" }] }), true);
+  assert.equal(hasGoverningSource({ authorityLevel: "Federal + ARC", publicSources: [] }), false);
+  assert.equal(hasGoverningSource({ authorityLevel: "Land and Earn grant", policyDocumentId: "doc-award" }), true);
+  assert.equal(hasGoverningSource({ authorityLevel: "Employer MOU", publicSources: [{ url: "https://example.com" }] }), false);
+  assert.equal(hasGoverningSource({ authorityLevel: "Employer MOU", mouDocumentId: "doc-signed-mou" }), true);
 });

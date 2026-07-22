@@ -137,6 +137,8 @@ export const policies = sqliteTable("policies", {
   effectiveEnd: text("effective_end"),
   version: text("version").notNull().default("1"),
   sourceDocumentId: text("source_document_id").references(() => documents.id),
+  publicSourcesJson: text("public_sources_json").notNull().default("[]"),
+  sourcesVerifiedAt: text("sources_verified_at"),
 });
 
 export const programSettings = sqliteTable("program_settings", {
