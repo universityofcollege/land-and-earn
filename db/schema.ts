@@ -149,6 +149,23 @@ export const programSettings = sqliteTable("program_settings", {
   paymentDeadline: text("payment_deadline").notNull(),
   retentionYears: integer("retention_years").notNull().default(7),
   poWarningPercent: integer("po_warning_percent").notNull().default(15),
+  retentionAnchorDate: text("retention_anchor_date"),
+  retentionPolicyConfirmed: integer("retention_policy_confirmed", { mode: "boolean" }).notNull().default(false),
+  retentionConfirmedAt: text("retention_confirmed_at"),
+  retentionConfirmedBy: text("retention_confirmed_by"),
+});
+
+export const retentionDispositions = sqliteTable("retention_dispositions", {
+  id: text("id").primaryKey(),
+  packetId: text("packet_id").notNull(),
+  eligibleAt: text("eligible_at").notNull(),
+  reason: text("reason").notNull(),
+  actor: text("actor").notNull(),
+  documentCount: integer("document_count").notNull(),
+  status: text("status").notNull().default("pending"),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at"),
+  errorMessage: text("error_message"),
 });
 
 export const mous = sqliteTable("mous", {

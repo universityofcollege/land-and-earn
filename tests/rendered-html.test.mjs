@@ -69,3 +69,20 @@ test("enforces role access and source-linked governing decisions", async () => {
   assert.match(worker, /private, no-store/);
   assert.match(worker, /x-frame-options/);
 });
+
+test("guards post-retention disposition before destructive storage work", async () => {
+  const [schema, data, page] = await Promise.all([
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/data.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(schema, /retentionDispositions/);
+  const disposition = data.slice(data.indexOf("export async function disposePacket"), data.indexOf("export async function reviewReminder"));
+  for (const guard of ["Type the packet ID exactly", "confirmed retention policy", "Retention has not elapsed", "Only an archived packet"]) assert.match(disposition, new RegExp(guard));
+  assert.ok(disposition.indexOf("confirmed retention policy") < disposition.indexOf("env.FILES.delete"));
+  assert.ok(disposition.indexOf("Retention has not elapsed") < disposition.indexOf("env.FILES.delete"));
+  assert.ok(disposition.indexOf("Only an archived packet") < disposition.indexOf("env.FILES.delete"));
+  assert.match(disposition, /sharedDocumentsRetained/);
+  assert.match(disposition, /retention_disposition_completed/);
+  assert.match(page, /Deletion remains disabled until this policy and anchor date are explicitly confirmed/);
+});

@@ -1,4 +1,4 @@
-import { adjustPurchaseOrder, approvePacket, correctExtractedField, createEmployer, createMouVersion, createPacket, decideClaim, decideEligibilityCheck, discardReminder, generateReminderDrafts, linkClaimSupportingDocument, linkDocumentToPacket, markPacketPaid, recordReminderCopy, resolveException, reviewExtractedField, reviewReminder, updateEmployer, updatePolicySource, updateProgramSettings, voidInvoice } from "../../../lib/data";
+import { adjustPurchaseOrder, approvePacket, archivePacket, correctExtractedField, createEmployer, createMouVersion, createPacket, decideClaim, decideEligibilityCheck, discardReminder, disposePacket, generateReminderDrafts, linkClaimSupportingDocument, linkDocumentToPacket, markPacketPaid, recordReminderCopy, resolveException, reviewExtractedField, reviewReminder, updateEmployer, updatePolicySource, updateProgramSettings, voidInvoice } from "../../../lib/data";
 import { accessErrorResponse, requireIdentity } from "../../../lib/auth";
 
 export async function POST(request: Request) {
@@ -16,6 +16,8 @@ export async function POST(request: Request) {
     if (body.action === "resolve_exception") return Response.json(await resolveException(body.id, String(body.reason ?? ""), identity.actor));
     if (body.action === "approve_packet") return Response.json(await approvePacket(body.id, identity.actor));
     if (body.action === "mark_paid") return Response.json(await markPacketPaid(body.id, identity.actor));
+    if (body.action === "archive_packet") return Response.json(await archivePacket(body.id, identity.actor));
+    if (body.action === "dispose_packet") return Response.json(await disposePacket({ id: body.id, confirmation: String(body.confirmation ?? ""), reason: String(body.reason ?? ""), actor: identity.actor }));
     if (body.action === "review_reminder") return Response.json(await reviewReminder(body.id, String(body.body ?? ""), identity.actor));
     if (body.action === "copy_reminder") return Response.json(await recordReminderCopy(body.id, String(body.body ?? ""), identity.actor));
     if (body.action === "discard_reminder") return Response.json(await discardReminder(body.id, identity.actor));

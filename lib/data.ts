@@ -5,6 +5,13 @@ import { extractDocument, sha256, type DocumentExtraction } from "./extraction";
 
 type Db = D1Database;
 
+function addCalendarYears(date: string, years: number) {
+  const value = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(value.getTime())) return null;
+  value.setUTCFullYear(value.getUTCFullYear() + years);
+  return value.toISOString().slice(0, 10);
+}
+
 const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS employers (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, county TEXT NOT NULL,
@@ -70,7 +77,15 @@ const schemaStatements = [
     id TEXT PRIMARY KEY, name TEXT NOT NULL, hourly_rate_cents INTEGER NOT NULL,
     fiscal_year_start TEXT NOT NULL, fiscal_year_end TEXT NOT NULL,
     invoice_deadline TEXT NOT NULL, payment_deadline TEXT NOT NULL,
-    retention_years INTEGER NOT NULL DEFAULT 7, po_warning_percent INTEGER NOT NULL DEFAULT 15
+    retention_years INTEGER NOT NULL DEFAULT 7, po_warning_percent INTEGER NOT NULL DEFAULT 15,
+    retention_anchor_date TEXT, retention_policy_confirmed INTEGER NOT NULL DEFAULT 0,
+    retention_confirmed_at TEXT, retention_confirmed_by TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS retention_dispositions (
+    id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, eligible_at TEXT NOT NULL,
+    reason TEXT NOT NULL, actor TEXT NOT NULL, document_count INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', started_at TEXT NOT NULL,
+    completed_at TEXT, error_message TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS mous (
     id TEXT PRIMARY KEY, employer_id TEXT NOT NULL REFERENCES employers(id), code TEXT NOT NULL,
@@ -141,6 +156,7 @@ export async function ensureDatabase() {
   await ensureColumns(db, "interns", [["supervisor_name", "TEXT"], ["supervisor_email", "TEXT"]]);
   await ensureColumns(db, "reminder_drafts", [["recipient_name", "TEXT"], ["recipient_email", "TEXT"], ["recipient_role", "TEXT NOT NULL DEFAULT 'Employer of record'"]]);
   await ensureColumns(db, "policies", [["effective_end", "TEXT"], ["version", "TEXT NOT NULL DEFAULT '1'"], ["source_document_id", "TEXT"]]);
+  await ensureColumns(db, "program_settings", [["retention_anchor_date", "TEXT"], ["retention_policy_confirmed", "INTEGER NOT NULL DEFAULT 0"], ["retention_confirmed_at", "TEXT"], ["retention_confirmed_by", "TEXT"]]);
   await ensureColumns(db, "packet_exceptions", [["resolution_type", "TEXT"], ["resolution_reason", "TEXT"], ["resolved_by", "TEXT"]]);
   await ensureColumns(db, "reimbursement_claims", [["supporting_document_id", "TEXT REFERENCES documents(id)"]]);
   await ensureColumns(db, "activity_hours", [["document_id", "TEXT REFERENCES documents(id)"]]);
@@ -153,8 +169,9 @@ export async function ensureDatabase() {
 }
 
 async function ensureOperationalDefaults(db: Db) {
-  await db.prepare(`INSERT OR IGNORE INTO program_settings VALUES
-    ('program-land-earn', 'Land and Earn', 1600, '2025-07-01', '2026-06-30', '2026-06-30', '2026-07-31', 7, 15)`).run();
+  await db.prepare(`INSERT OR IGNORE INTO program_settings
+    (id, name, hourly_rate_cents, fiscal_year_start, fiscal_year_end, invoice_deadline, payment_deadline, retention_years, po_warning_percent)
+    VALUES ('program-land-earn', 'Land and Earn', 1600, '2025-07-01', '2026-06-30', '2026-06-30', '2026-07-31', 7, 15)`).run();
   const employers = await rows<{ id: string; mou_code: string }>(db, "SELECT id, mou_code FROM employers");
   const statements: D1PreparedStatement[] = [];
   for (const employer of employers) statements.push(db.prepare(`INSERT OR IGNORE INTO mous
@@ -418,6 +435,7 @@ export async function getDashboardData(): Promise<Omit<DashboardData, "session">
     claims: claimsFor(String(row.id)), history: historyFor(String(row.id)),
   }));
   if (!settingsRow) throw new Error("Program settings are missing.");
+  const retentionEligibleAt = settingsRow.retention_anchor_date ? addCalendarYears(String(settingsRow.retention_anchor_date), Number(settingsRow.retention_years)) : null;
   return {
     generatedAt: new Date().toISOString(), hourlyRate: cents(settingsRow.hourly_rate_cents), fiscalYearEnd: String(settingsRow.fiscal_year_end), paymentDeadline: String(settingsRow.payment_deadline),
     employers, packets,
@@ -440,9 +458,10 @@ export async function getDashboardData(): Promise<Omit<DashboardData, "session">
       version: String(row.version ?? "1"), sourceDocumentId: row.source_document_id ? String(row.source_document_id) : null,
       sourceDocumentName: row.source_document_id ? String(documentRows.find((document) => document.id === row.source_document_id)?.file_name ?? "Governing source") : null,
     })),
-    settings: { id: String(settingsRow.id), name: String(settingsRow.name), hourlyRate: cents(settingsRow.hourly_rate_cents), fiscalYearStart: String(settingsRow.fiscal_year_start), fiscalYearEnd: String(settingsRow.fiscal_year_end), invoiceDeadline: String(settingsRow.invoice_deadline), paymentDeadline: String(settingsRow.payment_deadline), retentionYears: Number(settingsRow.retention_years), poWarningPercent: Number(settingsRow.po_warning_percent) },
+    settings: { id: String(settingsRow.id), name: String(settingsRow.name), hourlyRate: cents(settingsRow.hourly_rate_cents), fiscalYearStart: String(settingsRow.fiscal_year_start), fiscalYearEnd: String(settingsRow.fiscal_year_end), invoiceDeadline: String(settingsRow.invoice_deadline), paymentDeadline: String(settingsRow.payment_deadline), retentionYears: Number(settingsRow.retention_years), poWarningPercent: Number(settingsRow.po_warning_percent), retentionAnchorDate: settingsRow.retention_anchor_date ? String(settingsRow.retention_anchor_date) : null, retentionPolicyConfirmed: Boolean(settingsRow.retention_policy_confirmed), retentionConfirmedAt: settingsRow.retention_confirmed_at ? String(settingsRow.retention_confirmed_at) : null, retentionConfirmedBy: settingsRow.retention_confirmed_by ? String(settingsRow.retention_confirmed_by) : null, retentionEligibleAt },
     mous: mouRows.map((row) => ({ id: String(row.id), employerId: String(row.employer_id), code: String(row.code), version: String(row.version), effectiveStart: String(row.effective_start), effectiveEnd: String(row.effective_end), status: String(row.status), allowedExpenses: JSON.parse(String(row.allowed_expenses_json || "[]")) as string[], limits: JSON.parse(String(row.limits_json || "{}")) as Record<string, number>, conditions: JSON.parse(String(row.conditions_json || "[]")) as string[], evidenceRequirements: JSON.parse(String(row.evidence_requirements_json || "[]")) as string[], documentId: row.document_id ? String(row.document_id) : null, documentName: row.document_id ? String(documentRows.find((document) => document.id === row.document_id)?.file_name ?? "MOU source") : null })),
     unmatchedDocuments: documentRows.filter((row) => !row.packet_id && !documentLinkRows.some((link) => link.document_id === row.id) && !mouRows.some((mou) => mou.document_id === row.id) && !employerRows.some((employer) => employer.document_id === row.id) && !policyRows.some((policy) => policy.source_document_id === row.id)).map((row) => ({ id: String(row.id), employerId: String(row.employer_id), employerName: String(employerRows.find((employer) => employer.id === row.employer_id)?.name ?? "Unknown employer"), kind: String(row.kind), fileName: String(row.file_name), status: String(row.status), uploadedAt: String(row.uploaded_at), confidence: Number(row.classification_confidence ?? 0), provider: String(row.extraction_provider ?? "local"), hasOriginal: Boolean(row.r2_key) })),
+    retentionCandidates: packets.filter((packet) => packet.status === "archived").map((packet) => ({ id: packet.id, label: packet.label, employerName: packet.employerName, status: packet.status, eligibleAt: retentionEligibleAt, documentCount: packet.documents.length })),
   };
 }
 
@@ -518,6 +537,74 @@ export async function markPacketPaid(packetId: string, actor = "Program manager"
     .bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify(packet), JSON.stringify({ ...packet, status: "paid", paid_at: now })));
   await db.batch(operations);
   return { ok: true };
+}
+
+export async function archivePacket(packetId: string, actor = "Program manager") {
+  const db = await ensureDatabase();
+  const packet = await db.prepare("SELECT * FROM packets WHERE id = ? AND status = 'paid'").bind(packetId).first<Record<string, unknown>>();
+  if (!packet) throw new Error("Only a paid packet can be archived for retention.");
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare("UPDATE packets SET status = 'archived' WHERE id = ?").bind(packetId),
+    db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'packet_archived', ?, ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, packetId, actor, now, JSON.stringify(packet), JSON.stringify({ ...packet, status: "archived" })),
+  ]);
+  return { ok: true };
+}
+
+export async function disposePacket(input: { id: string; confirmation?: string; reason?: string; actor?: string }) {
+  const db = await ensureDatabase();
+  const actor = String(input.actor ?? "Program manager");
+  if (input.confirmation !== input.id) throw new Error("Type the packet ID exactly to authorize post-retention deletion.");
+  if (!input.reason?.trim() || input.reason.trim().length < 12) throw new Error("Document a specific retention-disposition reason.");
+  const settings = await db.prepare("SELECT * FROM program_settings WHERE id = 'program-land-earn'").first<Record<string, unknown>>();
+  if (!settings?.retention_policy_confirmed || !settings.retention_anchor_date) throw new Error("A confirmed retention policy and grant-closeout anchor date are required before deletion.");
+  const eligibleAt = addCalendarYears(String(settings.retention_anchor_date), Number(settings.retention_years));
+  if (!eligibleAt || new Date().toISOString().slice(0, 10) < eligibleAt) throw new Error(`Retention has not elapsed; this program becomes eligible for disposition on ${eligibleAt ?? "an unconfigured date"}.`);
+  const packet = await db.prepare("SELECT * FROM packets WHERE id = ? AND status = 'archived'").bind(input.id).first<Record<string, unknown>>();
+  if (!packet) throw new Error("Only an archived packet can be deleted after retention.");
+  const documents = await rows<{ id: string; r2_key: string | null; packet_id: string | null }>(db, `SELECT DISTINCT d.id, d.r2_key, d.packet_id FROM documents d LEFT JOIN document_packet_links l ON l.document_id = d.id WHERE d.packet_id = ? OR l.packet_id = ?`, [input.id, input.id]);
+  const exclusive: typeof documents = [];
+  const shared: Array<{ id: string; nextPacketId: string | null }> = [];
+  for (const document of documents) {
+    const other = await db.prepare("SELECT packet_id FROM document_packet_links WHERE document_id = ? AND packet_id <> ? ORDER BY linked_at LIMIT 1").bind(document.id, input.id).first<{ packet_id: string }>();
+    if (other?.packet_id) shared.push({ id: document.id, nextPacketId: other.packet_id });
+    else exclusive.push(document);
+  }
+  const now = new Date().toISOString();
+  const dispositionId = `ret-${crypto.randomUUID()}`;
+  await db.prepare(`INSERT INTO retention_dispositions
+    (id, packet_id, eligible_at, reason, actor, document_count, status, started_at, completed_at, error_message)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL)`).bind(dispositionId, input.id, eligibleAt, input.reason.trim(), actor, exclusive.length, now).run();
+  try {
+    if (env.FILES) for (const document of exclusive) if (document.r2_key) await env.FILES.delete(document.r2_key);
+    const operations: D1PreparedStatement[] = [
+      db.prepare("DELETE FROM eligibility_checks WHERE claim_id IN (SELECT id FROM reimbursement_claims WHERE packet_id = ?)").bind(input.id),
+      db.prepare("DELETE FROM reimbursement_claims WHERE packet_id = ?").bind(input.id),
+      db.prepare("DELETE FROM activity_hours WHERE packet_id = ?").bind(input.id),
+      db.prepare("DELETE FROM packet_exceptions WHERE packet_id = ?").bind(input.id),
+      db.prepare("DELETE FROM reminder_drafts WHERE packet_id = ?").bind(input.id),
+      db.prepare("DELETE FROM document_packet_links WHERE packet_id = ?").bind(input.id),
+      db.prepare("UPDATE audit_events SET before_json = NULL, after_json = NULL, reason = NULL WHERE entity_type = 'packet' AND entity_id = ?").bind(input.id),
+      db.prepare("UPDATE packets SET intern_id = NULL, label = ?, invoice_number = NULL, confidence = 0, status = 'retention_deleted' WHERE id = ?").bind(`Retained audit record · ${input.id}`, input.id),
+    ];
+    for (const document of exclusive) {
+      operations.push(db.prepare("DELETE FROM document_field_evidence WHERE document_id = ?").bind(document.id));
+      operations.push(db.prepare("UPDATE audit_events SET before_json = NULL, after_json = NULL, reason = NULL WHERE entity_type = 'document' AND entity_id = ?").bind(document.id));
+      operations.push(db.prepare("UPDATE documents SET packet_id = NULL, file_name = ?, r2_key = NULL, status = 'retention_deleted', amount_cents = NULL, extracted_json = '{}', content_hash = NULL, classification_confidence = 0, error_message = NULL WHERE id = ?").bind(`[deleted-${document.id}]`, document.id));
+    }
+    for (const document of shared) if (document.nextPacketId) operations.push(db.prepare("UPDATE documents SET packet_id = ? WHERE id = ? AND packet_id = ?").bind(document.nextPacketId, document.id, input.id));
+    if (packet.intern_id) {
+      const otherPacket = await db.prepare("SELECT id FROM packets WHERE intern_id = ? AND id <> ? LIMIT 1").bind(packet.intern_id, input.id).first();
+      if (!otherPacket) operations.push(db.prepare("UPDATE interns SET name = '[retention deleted]', county = '', placement = '', supervisor_name = NULL, supervisor_email = NULL WHERE id = ?").bind(packet.intern_id));
+    }
+    operations.push(db.prepare("UPDATE retention_dispositions SET status = 'completed', completed_at = ? WHERE id = ?").bind(new Date().toISOString(), dispositionId));
+    operations.push(db.prepare("INSERT INTO audit_events VALUES (?, 'packet', ?, 'retention_disposition_completed', ?, ?, NULL, ?, ?)").bind(`audit-${crypto.randomUUID()}`, input.id, actor, new Date().toISOString(), JSON.stringify({ dispositionId, eligibleAt, originalsDeleted: exclusive.length, sharedDocumentsRetained: shared.length }), input.reason.trim()));
+    await db.batch(operations);
+  } catch (error) {
+    await db.prepare("UPDATE retention_dispositions SET status = 'failed', error_message = ? WHERE id = ?").bind(error instanceof Error ? error.message : "Disposition failed", dispositionId).run();
+    throw error;
+  }
+  return { ok: true, dispositionId, originalsDeleted: exclusive.length, sharedDocumentsRetained: shared.length };
 }
 
 export async function reviewReminder(reminderId: string, body?: string, actor = "Program manager") {
@@ -893,11 +980,17 @@ export async function updateProgramSettings(input: Record<string, unknown>) {
   const before = await db.prepare("SELECT * FROM program_settings WHERE id = 'program-land-earn'").first<Record<string, unknown>>();
   const hourlyRateCents = Math.round(Number(input.hourlyRate ?? 0) * 100);
   const retentionYears = Number(input.retentionYears ?? 7); const poWarningPercent = Number(input.poWarningPercent ?? 15);
+  const retentionAnchorDate = String(input.retentionAnchorDate ?? "") || null;
+  const retentionPolicyConfirmed = input.retentionPolicyConfirmed === true || input.retentionPolicyConfirmed === "on";
   if (!hourlyRateCents || retentionYears < 7 || poWarningPercent < 0 || poWarningPercent > 100) throw new Error("Enter valid program settings; retention must be at least seven years.");
+  if (retentionPolicyConfirmed && !retentionAnchorDate) throw new Error("Enter the confirmed grant-closeout retention anchor date before enabling disposition.");
   const now = new Date().toISOString();
+  const retainPriorConfirmation = retentionPolicyConfirmed && Boolean(before?.retention_policy_confirmed) && before?.retention_anchor_date === retentionAnchorDate && Number(before?.retention_years) === retentionYears;
+  const confirmedAt = retentionPolicyConfirmed ? (retainPriorConfirmation ? before?.retention_confirmed_at : now) : null;
+  const confirmedBy = retentionPolicyConfirmed ? (retainPriorConfirmation ? before?.retention_confirmed_by : actor) : null;
   await db.batch([
-    db.prepare(`UPDATE program_settings SET hourly_rate_cents = ?, fiscal_year_start = ?, fiscal_year_end = ?, invoice_deadline = ?, payment_deadline = ?, retention_years = ?, po_warning_percent = ? WHERE id = 'program-land-earn'`)
-      .bind(hourlyRateCents, input.fiscalYearStart, input.fiscalYearEnd, input.invoiceDeadline, input.paymentDeadline, retentionYears, poWarningPercent),
+    db.prepare(`UPDATE program_settings SET hourly_rate_cents = ?, fiscal_year_start = ?, fiscal_year_end = ?, invoice_deadline = ?, payment_deadline = ?, retention_years = ?, po_warning_percent = ?, retention_anchor_date = ?, retention_policy_confirmed = ?, retention_confirmed_at = ?, retention_confirmed_by = ? WHERE id = 'program-land-earn'`)
+      .bind(hourlyRateCents, input.fiscalYearStart, input.fiscalYearEnd, input.invoiceDeadline, input.paymentDeadline, retentionYears, poWarningPercent, retentionAnchorDate, retentionPolicyConfirmed ? 1 : 0, confirmedAt, confirmedBy),
     db.prepare("INSERT INTO audit_events VALUES (?, 'program', 'program-land-earn', 'settings_updated', ?, ?, ?, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, actor, now, JSON.stringify(before), JSON.stringify({ ...input, actor: undefined })),
   ]);
   return { ok: true };

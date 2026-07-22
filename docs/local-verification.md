@@ -10,7 +10,7 @@ Data: synthetic fixtures only; no real youth or payroll PII
 TypeScript: pass
 ESLint: pass
 Production build: pass
-Node tests: 12 passed, 0 failed
+Node tests: 13 passed, 0 failed
 ```
 
 ## Runtime scenarios
@@ -34,6 +34,7 @@ Node tests: 12 passed, 0 failed
 | Anonymous request in required-auth mode | HTTP 401 |
 | Program-manager identity in allowlist | Dashboard HTTP 200 with manager role and named actor |
 | Fiscal-reviewer identity in allowlist | Dashboard HTTP 200; mutation attempt HTTP 403 |
+| Retention safety ordering | Non-destructive automated inspection confirms typed packet ID, confirmed policy, elapsed date, and archived-status guards execute before any R2 deletion |
 
 ## Reproduction commands
 
@@ -45,4 +46,4 @@ npm run build
 node --test tests/rendered-html.test.mjs tests/extraction.test.ts
 ```
 
-The local development URL is `http://localhost:3001/` while the current Codex task’s dev server is running. Localhost uses an explicit development-only manager identity unless `AUTH_MODE=required`; hosted environments always require the forwarded workspace identity and an email allowlist assignment.
+The local development URL is `http://localhost:3001/` while the current Codex task’s dev server is running. Localhost uses an explicit development-only manager identity unless `AUTH_MODE=required`; hosted environments always require the forwarded workspace identity and an email allowlist assignment. No destructive retention test was run against live local records.
