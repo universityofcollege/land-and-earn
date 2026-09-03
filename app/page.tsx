@@ -437,7 +437,7 @@ export default function LandAndEarnApp() {
     return result;
   }, []);
 
-  // The dashboard is hydrated from the durable D1-backed API after the client mounts.
+  // The dashboard is hydrated from the durable Turso-backed API after the client mounts.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load().catch((reason) => setError(reason instanceof Error ? reason.message : "The reimbursement desk could not open.")); }, [load]);
 

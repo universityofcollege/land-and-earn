@@ -1,10 +1,11 @@
-import { env } from "cloudflare:workers";
 import { strToU8, zipSync } from "fflate";
 import type { DashboardData } from "./types";
 import { extractDocument, sha256, type DocumentExtraction } from "./extraction";
 import { hasGoverningSource } from "./policy";
+import { getDatabase, type Database, type PreparedStatement } from "./database";
+import { deleteOriginal, readOriginal, storeOriginal } from "./storage";
 
-type Db = D1Database;
+type Db = Database;
 
 function addCalendarYears(date: string, years: number) {
   const value = new Date(`${date}T12:00:00Z`);
@@ -143,8 +144,7 @@ const schemaStatements = [
 ];
 
 function database() {
-  if (!env.DB) throw new Error("The Land and Earn database is not connected.");
-  return env.DB;
+  return getDatabase();
 }
 
 async function rows<T>(db: Db, sql: string, values: unknown[] = []) {
@@ -176,7 +176,7 @@ async function ensureOperationalDefaults(db: Db) {
     (id, name, hourly_rate_cents, fiscal_year_start, fiscal_year_end, invoice_deadline, payment_deadline, retention_years, po_warning_percent)
     VALUES ('program-land-earn', 'Land and Earn', 1600, '2025-07-01', '2026-06-30', '2026-06-30', '2026-07-31', 7, 15)`).run();
   const employers = await rows<{ id: string; mou_code: string }>(db, "SELECT id, mou_code FROM employers");
-  const statements: D1PreparedStatement[] = [];
+  const statements: PreparedStatement[] = [];
   for (const employer of employers) statements.push(db.prepare(`INSERT OR IGNORE INTO mous
     (id, employer_id, code, version, effective_start, effective_end, status, allowed_expenses_json,
      limits_json, conditions_json, evidence_requirements_json, document_id, created_at)
@@ -208,7 +208,7 @@ async function ensureColumns(db: Db, table: string, additions: Array<[string, st
 }
 
 async function seedDatabase(db: Db) {
-  const statements: D1PreparedStatement[] = [];
+  const statements: PreparedStatement[] = [];
   const add = (sql: string, ...values: unknown[]) => statements.push(db.prepare(sql).bind(...values));
 
   const employers = [
@@ -586,8 +586,8 @@ export async function disposePacket(input: { id: string; confirmation?: string; 
     (id, packet_id, eligible_at, reason, actor, document_count, status, started_at, completed_at, error_message)
     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL)`).bind(dispositionId, input.id, eligibleAt, input.reason.trim(), actor, exclusive.length, now).run();
   try {
-    if (env.FILES) for (const document of exclusive) if (document.r2_key) await env.FILES.delete(document.r2_key);
-    const operations: D1PreparedStatement[] = [
+    for (const document of exclusive) if (document.r2_key) await deleteOriginal(String(document.r2_key));
+    const operations: PreparedStatement[] = [
       db.prepare("DELETE FROM eligibility_checks WHERE claim_id IN (SELECT id FROM reimbursement_claims WHERE packet_id = ?)").bind(input.id),
       db.prepare("DELETE FROM reimbursement_claims WHERE packet_id = ?").bind(input.id),
       db.prepare("DELETE FROM activity_hours WHERE packet_id = ?").bind(input.id),
@@ -850,7 +850,7 @@ export async function linkDocumentToPacket(input: { id: string; packetId?: strin
   const existing = await db.prepare("SELECT id FROM document_packet_links WHERE document_id = ? AND packet_id = ?").bind(input.id, input.packetId).first();
   if (existing) return { ok: true };
   const now = new Date().toISOString();
-  const operations: D1PreparedStatement[] = [
+  const operations: PreparedStatement[] = [
     db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, ?, ?, ?)").bind(`link-${crypto.randomUUID()}`, input.id, input.packetId, document.packet_id ? 0 : 1, now, String(input.actor ?? "Program manager")),
     db.prepare("UPDATE documents SET packet_id = COALESCE(packet_id, ?) WHERE id = ?").bind(input.packetId, input.id),
     db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'linked_to_packet', ?, ?, NULL, ?, NULL)").bind(`audit-${crypto.randomUUID()}`, input.id, String(input.actor ?? "Program manager"), now, JSON.stringify({ packetId: input.packetId })),
@@ -1208,9 +1208,9 @@ async function storeOneDocument(db: Db, file: File, form: FormData, actor: strin
     return { id: duplicate.id, fileName: duplicate.file_name, kind, status: "duplicate", duplicate: true };
   }
   const extraction = await extractDocument(file, kind, {
-    enabled: env.AI_EXTRACTION_ENABLED === "true",
-    apiKey: env.OPENAI_API_KEY,
-    model: env.OPENAI_MODEL,
+    enabled: process.env.AI_EXTRACTION_ENABLED === "true",
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL,
   });
   const detectedKind = extraction.documentType === "unknown" ? kind : extraction.documentType;
   const extractedAmount = numericExtractedValue(extraction, "invoiceAmount");
@@ -1233,14 +1233,14 @@ async function storeOneDocument(db: Db, file: File, form: FormData, actor: strin
   }
   const id = `doc-${crypto.randomUUID()}`;
   const key = `${employerId}/${new Date().toISOString().slice(0, 10)}/${id}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
-  if (env.FILES) await env.FILES.put(key, file.stream(), { httpMetadata: { contentType: file.type || "application/octet-stream" } });
+  const storageKey = await storeOriginal(key, file);
   const now = new Date().toISOString();
   const status = extraction.classificationConfidence >= 85 && extraction.fields.every((field) => field.confidence >= 80) ? "extracted" : "needs_review";
-  const operations: D1PreparedStatement[] = [db.prepare(`INSERT INTO documents
+  const operations: PreparedStatement[] = [db.prepare(`INSERT INTO documents
     (id, employer_id, packet_id, kind, file_name, r2_key, status, amount_cents, extracted_json,
      content_hash, classification_confidence, extraction_provider, uploader, source, processed_at, uploaded_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'web_upload', ?, ?)`)
-    .bind(id, employerId, packetId, detectedKind, file.name, env.FILES ? key : null, status, effectiveAmountCents,
+    .bind(id, employerId, packetId, detectedKind, file.name, storageKey, status, effectiveAmountCents,
       JSON.stringify({ ...extraction, fileSize: file.size, contentType: file.type }), contentHash,
       extraction.classificationConfidence, extraction.provider, actor, now, now)];
   if (packetId) operations.push(db.prepare("INSERT INTO document_packet_links VALUES (?, ?, ?, 1, ?, ?)").bind(`link-${crypto.randomUUID()}`, id, packetId, now, actor));
@@ -1346,13 +1346,13 @@ export async function storeDocuments(form: FormData, actor = "Program manager") 
 export async function getDocumentOriginal(documentId: string, actor = "Authorized user") {
   const db = await ensureDatabase();
   const document = await db.prepare("SELECT * FROM documents WHERE id = ?").bind(documentId).first<Record<string, unknown>>();
-  if (!document?.r2_key || !env.FILES) throw new Error("The original file is not available in document storage.");
-  const object = await env.FILES.get(String(document.r2_key));
+  if (!document?.r2_key) throw new Error("The original file is not available in document storage.");
+  const object = await readOriginal(String(document.r2_key));
   if (!object) throw new Error("The original file could not be found.");
   const now = new Date().toISOString();
   await db.prepare("INSERT INTO audit_events VALUES (?, 'document', ?, 'original_viewed', ?, ?, NULL, NULL, NULL)")
     .bind(`audit-${crypto.randomUUID()}`, documentId, actor, now).run();
-  return { body: object.body, contentType: object.httpMetadata?.contentType ?? "application/octet-stream", fileName: String(document.file_name) };
+  return { body: object.body, contentType: object.contentType, fileName: String(document.file_name) };
 }
 
 const htmlEscape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ?? character);
@@ -1389,8 +1389,8 @@ export async function buildPacketArchive(packetId: string, actor = "Authorized u
   const files: Record<string, Uint8Array> = { "packet-summary.html": strToU8(summary.html) };
   let included = 0;
   for (const [index, document] of documents.entries()) {
-    if (!document.r2_key || !env.FILES) continue;
-    const object = await env.FILES.get(document.r2_key);
+    if (!document.r2_key) continue;
+    const object = await readOriginal(document.r2_key);
     if (!object) continue;
     const safeName = document.file_name.replace(/[^a-zA-Z0-9._-]/g, "-");
     files[`supporting-documents/${String(index + 1).padStart(2, "0")}-${safeName}`] = new Uint8Array(await new Response(object.body).arrayBuffer());
