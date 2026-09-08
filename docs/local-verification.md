@@ -1,7 +1,7 @@
 # Local verification record
 
 Date: 2026-07-22  
-Environment: local Vinext + Cloudflare Miniflare D1/R2  
+Environment: local Next.js + libSQL database + filesystem-backed document storage
 Data: synthetic fixtures only; no real youth or payroll PII
 
 ## Automated gates
@@ -35,7 +35,7 @@ Node tests: 14 passed, 0 failed
 | Anonymous request in required-auth mode | HTTP 401 |
 | Program-manager identity in allowlist | Dashboard HTTP 200 with manager role and named actor |
 | Fiscal-reviewer identity in allowlist | Dashboard HTTP 200; mutation attempt HTTP 403 |
-| Retention safety ordering | Non-destructive automated inspection confirms typed packet ID, confirmed policy, elapsed date, and archived-status guards execute before any R2 deletion |
+| Retention safety ordering | Non-destructive automated inspection confirms typed packet ID, confirmed policy, elapsed date, and archived-status guards execute before any private-blob deletion |
 
 ## Reproduction commands
 
